@@ -1,0 +1,1101 @@
+"use client";
+
+import { type ChangeEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { Eye, Heart, ImagePlus, Lock, Pin, Plus, Send, Share2, Smile } from "lucide-react";
+import { createSupabaseBrowser } from "@/lib/supabase-browser";
+import { MAX_MESSAGE_LENGTH } from "@/lib/validation";
+
+type Chat = {
+  id: string;
+  title: string;
+  slug: string;
+};
+
+type Member = {
+  id: string;
+  name: string;
+};
+
+type ChatMember = Member & {
+  chat_id: string;
+  created_at: string;
+  last_seen_at: string | null;
+  last_read_at: string | null;
+};
+
+type MemberEntryMode = "choice" | "new" | "existing";
+
+type Message = {
+  id: string;
+  chat_id: string;
+  member_id: string;
+  type: "text" | "system" | "image";
+  text: string;
+  image_url?: string | null;
+  created_at: string;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  members?: {
+    name: string;
+  } | null;
+};
+
+const MEMBER_ID_KEY = "family_chat_member_id";
+const MEMBER_NAME_KEY = "family_chat_member_name";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PIN_PATTERN = /^\d{4}$/;
+const ONLINE_WINDOW_MS = 2 * 60 * 1000;
+const HEARTBEAT_MS = 45 * 1000;
+const SYSTEM_MESSAGE_VISIBLE_MS = 5 * 1000;
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
+const IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+const QUICK_EMOJIS = [
+  "😊",
+  "🥰",
+  "💛",
+  "😂",
+  "🤗",
+  "😘",
+  "🙏",
+  "👍",
+  "🎉"
+];
+
+export default function HomePage() {
+  const [authenticated, setAuthenticated] = useState(false);
+  const [chat, setChat] = useState<Chat | null>(null);
+  const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [member, setMember] = useState<Member | null>(null);
+  const [name, setName] = useState("");
+  const [nameError, setNameError] = useState("");
+  const [memberEntryMode, setMemberEntryMode] = useState<MemberEntryMode>("choice");
+  const [pin, setPin] = useState("");
+  const [pinConfirm, setPinConfirm] = useState("");
+  const [isSavingMember, setIsSavingMember] = useState(false);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [members, setMembers] = useState<ChatMember[]>([]);
+  const [membersLoaded, setMembersLoaded] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
+  const [lastReadAt, setLastReadAt] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [imageViewerUrl, setImageViewerUrl] = useState<string | null>(null);
+  const [sendError, setSendError] = useState("");
+  const [now, setNow] = useState(() => Date.now());
+  const [installPrompt, setInstallPrompt] = useState<any>(null);
+  const [installHelpOpen, setInstallHelpOpen] = useState(false);
+  const [loadingSession, setLoadingSession] = useState(true);
+  const [connectionError, setConnectionError] = useState("");
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const emojiPanelRef = useRef<HTMLDivElement | null>(null);
+  const emojiButtonRef = useRef<HTMLButtonElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+
+  const supabase = useMemo(() => createSupabaseBrowser(), []);
+  const onlineCount = members.filter(isOnline).length;
+  const unreadCount = member && lastReadAt ? messages.filter((message) => isUnread(message, member.id, lastReadAt)).length : 0;
+  const visibleMessages = messages.filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
+
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      if (process.env.NODE_ENV === "production") {
+        navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      } else {
+        navigator.serviceWorker.getRegistrations().then((registrations) => {
+          registrations.forEach((registration) => registration.unregister());
+        });
+      }
+    }
+
+    const handleBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    return () => window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+  }, []);
+
+  useEffect(() => {
+    if (!emojiOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (emojiPanelRef.current?.contains(target) || emojiButtonRef.current?.contains(target)) return;
+      setEmojiOpen(false);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [emojiOpen]);
+
+  useEffect(() => {
+    if (!messages.some((message) => message.type === "system")) return;
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [messages]);
+
+  useEffect(() => {
+    async function restoreSession() {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const storedMember = readStoredMember();
+        const response = await fetch("/api/auth", {
+          signal: controller.signal
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.authenticated) {
+            if (!data.chat) {
+              setConnectionError(data.error || "Не удалось подключиться к чату. Попробуйте обновить страницу.");
+              setLoginError(data.error || "Не удалось подключиться к чату. Попробуйте обновить страницу.");
+              return;
+            }
+            setAuthenticated(true);
+            setChat(data.chat);
+            if (storedMember) {
+              setMember(storedMember);
+              verifyStoredMember(storedMember);
+            }
+          } else if (storedMember) {
+            setConnectionError("Сессия входа устарела. Введите общий пароль снова.");
+            setLoginError("Сессия входа устарела. Введите общий пароль снова.");
+          }
+        } else if (storedMember) {
+          setConnectionError("Не удалось проверить сессию. Сохраненный участник не удален.");
+          setLoginError("Не удалось проверить сессию. Сохраненный участник не удален.");
+        }
+      } catch {
+        if (readStoredMember()) {
+          setConnectionError("Ошибка подключения. Сохраненный участник не удален.");
+          setLoginError("Ошибка подключения. Сохраненный участник не удален.");
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        setLoadingSession(false);
+      }
+    }
+
+    restoreSession();
+  }, []);
+
+  useEffect(() => {
+    if (!authenticated || !chat) return;
+    setMembersLoaded(false);
+    loadMessages();
+    loadMembers();
+  }, [authenticated, chat]);
+
+  useEffect(() => {
+    if (!member) return;
+    const currentMember = members.find((chatMember) => chatMember.id === member.id);
+    if (currentMember?.last_read_at) setLastReadAt(currentMember.last_read_at);
+  }, [member, members]);
+
+  useEffect(() => {
+    if (!authenticated || !member) return;
+
+    const markRead = async () => {
+      if (document.hidden) return;
+      const readAt = new Date().toISOString();
+      setLastReadAt(readAt);
+      await fetch("/api/members", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ member_id: member.id, mark_read: true })
+      }).catch(() => undefined);
+    };
+
+    markRead();
+    const handleVisible = () => {
+      if (!document.hidden) markRead();
+    };
+
+    document.addEventListener("visibilitychange", handleVisible);
+    window.addEventListener("focus", handleVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisible);
+      window.removeEventListener("focus", handleVisible);
+    };
+  }, [authenticated, member, messages.length]);
+
+  useEffect(() => {
+    const badgeNavigator = navigator as Navigator & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+
+    if (unreadCount > 0) {
+      badgeNavigator.setAppBadge?.(unreadCount).catch(() => undefined);
+      return;
+    }
+
+    badgeNavigator.clearAppBadge?.().catch(() => undefined);
+  }, [unreadCount]);
+
+  useEffect(() => {
+    if (!authenticated || !member) return;
+
+    const touchMember = async () => {
+      if (document.hidden) return;
+
+      const response = await fetch("/api/members", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ member_id: member.id })
+      });
+
+      if (response.status === 403) {
+        clearStoredMember();
+        setMember(null);
+        return;
+      }
+
+      if (response.ok) loadMembers();
+      if (!response.ok && response.status !== 403) {
+        setConnectionError("Ошибка подключения. Сохраненный участник не удален.");
+      }
+    };
+
+    touchMember();
+    const intervalId = window.setInterval(touchMember, HEARTBEAT_MS);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) touchMember();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [authenticated, member]);
+
+  useEffect(() => {
+    if (!authenticated || !chat || !supabase) return;
+
+    const channel = supabase
+      .channel(`family-chat-${chat.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `chat_id=eq.${chat.id}`
+        },
+        () => {
+          loadMessages();
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "messages",
+          filter: `chat_id=eq.${chat.id}`
+        },
+        () => {
+          loadMessages();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [authenticated, chat, supabase]);
+
+  useEffect(() => {
+    listRef.current?.scrollTo({
+      top: listRef.current.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [visibleMessages.length]);
+
+  function readStoredMember() {
+    const id = localStorage.getItem(MEMBER_ID_KEY);
+    const storedName = localStorage.getItem(MEMBER_NAME_KEY);
+    if (!id && !storedName) return null;
+    if (!id || !storedName || !UUID_PATTERN.test(id)) {
+      clearStoredMember();
+      return null;
+    }
+    return { id, name: storedName };
+  }
+
+  function saveStoredMember(nextMember: Member) {
+    localStorage.setItem(MEMBER_ID_KEY, nextMember.id);
+    localStorage.setItem(MEMBER_NAME_KEY, nextMember.name);
+  }
+
+  function clearStoredMember() {
+    localStorage.removeItem(MEMBER_ID_KEY);
+    localStorage.removeItem(MEMBER_NAME_KEY);
+  }
+
+  async function verifyStoredMember(storedMember: Member) {
+    const response = await fetch(`/api/members?member_id=${encodeURIComponent(storedMember.id)}`).catch(() => null);
+    if (!response) {
+      setConnectionError("Ошибка подключения. Сохраненный участник не удален.");
+      return;
+    }
+    if (response.status === 404 || response.status === 403) {
+      clearStoredMember();
+      setMember(null);
+      setConnectionError("");
+      return;
+    }
+    if (!response.ok) {
+      setConnectionError("Не удалось проверить участника. Сохраненная сессия не удалена.");
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (data.member?.id && data.member?.name) {
+      saveStoredMember({ id: data.member.id, name: data.member.name });
+      setMember({ id: data.member.id, name: data.member.name });
+      setConnectionError("");
+    }
+  }
+
+  async function handleLogin(event: FormEvent) {
+    event.preventDefault();
+    setLoginError("");
+    setIsLoggingIn(true);
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 9000);
+    let response: Response;
+    let data: any = {};
+
+    try {
+      response = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+        signal: controller.signal
+      });
+      data = await response.json().catch(() => ({}));
+    } catch {
+      setLoginError("Не удалось открыть чат. Попробуйте обновить страницу.");
+      setIsLoggingIn(false);
+      window.clearTimeout(timeoutId);
+      return;
+    }
+
+    setIsLoggingIn(false);
+    window.clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      setLoginError(data.error || "Неверный пароль");
+      return;
+    }
+
+    setAuthenticated(true);
+    setChat(data.chat);
+    setConnectionError("");
+    const storedMember = readStoredMember();
+    if (storedMember) {
+      setMember(storedMember);
+      verifyStoredMember(storedMember);
+    }
+  }
+
+  async function handleCreateMember(event: FormEvent) {
+    event.preventDefault();
+    setNameError("");
+    setIsSavingMember(true);
+
+    if (!PIN_PATTERN.test(pin)) {
+      setNameError("PIN должен состоять из 4 цифр");
+      setIsSavingMember(false);
+      return;
+    }
+
+    if (memberEntryMode === "new" && pin !== pinConfirm) {
+      setNameError("PIN не совпадает");
+      setIsSavingMember(false);
+      return;
+    }
+
+    const response = await fetch("/api/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: memberEntryMode === "existing" ? "existing" : "new",
+        name,
+        pin
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    setIsSavingMember(false);
+
+    if (!response.ok) {
+      setNameError(data.error || "Введите имя");
+      return;
+    }
+
+    saveStoredMember({ id: data.member.id, name: data.member.name });
+    setMembersLoaded(false);
+    setMember({ id: data.member.id, name: data.member.name });
+    setMemberEntryMode("choice");
+    setPin("");
+    setPinConfirm("");
+    setName("");
+    setMembers((current) => {
+      if (current.some((chatMember) => chatMember.id === data.member.id)) return current;
+      return [...current, data.member];
+    });
+    loadMembers();
+  }
+
+  async function loadMessages() {
+    const response = await fetch("/api/messages");
+    if (!response.ok) return;
+    const data = await response.json();
+    setMessages(data.messages || []);
+  }
+
+  async function loadMembers() {
+    const response = await fetch("/api/members");
+    if (!response.ok) {
+      setConnectionError("Ошибка подключения. Сохраненный участник не удален.");
+      return;
+    }
+    const data = await response.json();
+    setMembers(data.members || []);
+    setMembersLoaded(true);
+    setConnectionError("");
+  }
+
+  async function handleSend() {
+    const text = draft.trim();
+    if (!text || !member) return;
+
+    setSendError("");
+    const response = await fetch("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        member_id: member.id,
+        text
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      if (response.status === 403) {
+        clearStoredMember();
+        setMember(null);
+      }
+      setSendError(data.error || "Не удалось отправить");
+      return;
+    }
+
+    setDraft("");
+    setEmojiOpen(false);
+    loadMembers();
+    setMessages((current) => {
+      if (current.some((message) => message.id === data.message.id)) return current;
+      return [...current, data.message];
+    });
+  }
+
+  function handleQuickEmoji(value: string) {
+    setDraft((current) => {
+      const separator = current.length > 0 && !current.endsWith(" ") ? " " : "";
+      return `${current}${separator}${value}`.slice(0, MAX_MESSAGE_LENGTH);
+    });
+  }
+
+  async function handleImageSelect(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !member) return;
+
+    if (!IMAGE_TYPES.includes(file.type)) {
+      setSendError("Можно отправить только jpg, png или webp");
+      return;
+    }
+
+    if (file.size > MAX_IMAGE_SIZE) {
+      setSendError("Фото должно быть до 20 МБ");
+      return;
+    }
+
+    setSendError("");
+    setEmojiOpen(false);
+    setIsUploadingImage(true);
+
+    const prepareResponse = await fetch("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        member_id: member.id,
+        prepare_image: true,
+        file_type: file.type,
+        file_size: file.size
+      })
+    });
+    const prepared = await prepareResponse.json().catch(() => ({}));
+
+    if (!prepareResponse.ok || !prepared.path || !prepared.token) {
+      setIsUploadingImage(false);
+      setSendError(getImageUploadError(prepareResponse.status, prepared.error));
+      return;
+    }
+
+    if (!supabase) {
+      setIsUploadingImage(false);
+      setSendError("Не удалось загрузить фото");
+      return;
+    }
+
+    const { error: uploadError } = await supabase.storage.from("family-chat-photos").uploadToSignedUrl(prepared.path, prepared.token, file);
+    if (uploadError) {
+      setIsUploadingImage(false);
+      setSendError("Не удалось загрузить фото");
+      return;
+    }
+
+    const response = await fetch("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        member_id: member.id,
+        image_path: prepared.path
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    setIsUploadingImage(false);
+
+    if (!response.ok) {
+      if (response.status === 403) {
+        clearStoredMember();
+        setMember(null);
+      }
+      setSendError(getImageUploadError(response.status, data.error));
+      return;
+    }
+
+    loadMembers();
+    setMessages((current) => {
+      if (current.some((message) => message.id === data.message.id)) return current;
+      return [...current, data.message];
+    });
+  }
+
+  function getImageUploadError(status: number, error?: string) {
+    if (status === 400) return "Можно отправить только фото jpg, png или webp до 20 МБ";
+    if (status === 403) return "Сессия устарела. Войдите в чат снова.";
+    return error && !error.includes("Р") ? error : "Не удалось загрузить фото";
+  }
+
+  function handleMessageKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey && !isTouchLike()) {
+      event.preventDefault();
+      handleSend();
+    }
+  }
+
+  function isTouchLike() {
+    return window.matchMedia("(pointer: coarse)").matches;
+  }
+
+  async function handleLogout() {
+    await fetch("/api/auth", { method: "DELETE" }).catch(() => undefined);
+    clearStoredMember();
+    setAuthenticated(false);
+    setChat(null);
+    setMember(null);
+    setMessages([]);
+    setMembers([]);
+    setMembersLoaded(false);
+    setMembersOpen(false);
+    setLogoutOpen(false);
+    setLastReadAt(null);
+    setPassword("");
+    setName("");
+    setDraft("");
+    setLoginError("");
+    setNameError("");
+    setSendError("");
+    setEmojiOpen(false);
+    setImageViewerUrl(null);
+    setIsUploadingImage(false);
+  }
+
+  async function handleDeleteMessage() {
+    if (!messageToDelete || !member) return;
+
+    const targetMessage = messageToDelete;
+    setMessageToDelete(null);
+
+    const response = await fetch("/api/messages", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message_id: targetMessage.id,
+        member_id: member.id
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      setSendError(data.error || "Не удалось удалить сообщение");
+      return;
+    }
+
+    setMessages((current) => current.map((message) => (message.id === data.message.id ? data.message : message)));
+  }
+
+  async function handleInstallClick() {
+    if (installPrompt) {
+      installPrompt.prompt();
+      await installPrompt.userChoice.catch(() => undefined);
+      setInstallPrompt(null);
+      return;
+    }
+
+    setInstallHelpOpen(true);
+  }
+
+  if (loadingSession) {
+    return (
+      <main className="app-shell">
+        <div className="phone-frame login-frame">
+          <div className="loading">Открываем семейный чат...</div>
+        </div>
+      </main>
+    );
+  }
+
+  if (!authenticated) {
+    return (
+      <main className="app-shell">
+        <div className="phone-frame login-frame">
+          <section className="screen login-screen">
+            <div className="login-art" aria-hidden="true">
+              <img className="family-hero-image" src="/family-hero.png" alt="" />
+            </div>
+
+            <div className="hero-copy">
+              <div className="heart-mark">♥</div>
+              <h1>Семейный чат</h1>
+              <p className="subtitle">Уютное место для общения с близкими</p>
+            </div>
+
+            <form className="login-form" onSubmit={handleLogin}>
+              <label className="input-wrap" htmlFor="password">
+                <Lock size={24} />
+                <span className="sr-only">Пароль</span>
+                <input
+                  id="password"
+                  type="password"
+                  autoComplete="current-password"
+                  placeholder="Пароль"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+                <Eye size={25} />
+              </label>
+              <p className="error-text">{loginError}</p>
+              <button className="primary-button" type="submit" disabled={isLoggingIn}>
+                {isLoggingIn ? "Входим..." : "Войти"}
+              </button>
+              <button className="secondary-button" type="button" onClick={handleInstallClick}>
+                <Plus size={24} />
+                Добавить на телефон
+              </button>
+              <p className="install-hint">Чтобы открывать чат с иконки на главном экране</p>
+            </form>
+
+            <div className="footer-note">
+              <span />
+              <Heart size={18} fill="currentColor" />
+              <span />
+            </div>
+            <p className="footer-text">Только для своих</p>
+          </section>
+        </div>
+        {installHelpOpen && <InstallHelp onClose={() => setInstallHelpOpen(false)} />}
+      </main>
+    );
+  }
+
+  return (
+    <main className="app-shell">
+      <div className="phone-frame chat-frame">
+        <section className="chat-screen">
+          <div className="chat-decor" aria-hidden="true">
+            <span className="decor-heart decor-heart-a">♥</span>
+            <span className="decor-heart decor-heart-b">♥</span>
+            <span className="decor-heart decor-heart-c">♥</span>
+            <span className="decor-leaf decor-leaf-a">⌇</span>
+            <span className="decor-leaf decor-leaf-b">⌇</span>
+            <span className="decor-leaf decor-leaf-c">⌇</span>
+            <span className="decor-leaf decor-leaf-d">⌇</span>
+          </div>
+          <div className="chat-top">
+          <header className="chat-header">
+            <button className="back-button" type="button" aria-label="Назад" onClick={() => setLogoutOpen(true)}>
+              ‹
+            </button>
+            <div>
+              <h1 className="chat-title">Семейный чат</h1>
+              <p className="chat-subtitle">
+                <span /> для своих
+              </p>
+            </div>
+            <img className="header-icon" src="/icons/icon-192.png" alt="" />
+          </header>
+          <button className="chat-subtitle members-toggle" type="button" onClick={() => setMembersOpen((open) => !open)}>
+            <span /> {formatMembersSummary(members.length, onlineCount)}
+          </button>
+          {unreadCount > 0 && <div className="unread-counter">{unreadCount} новых</div>}
+          {membersOpen && (
+            <div className="members-panel">
+              <p className="members-title">Кто в чате</p>
+              <div className="members-list">
+                {members.map((chatMember) => (
+                  <div className="member-row" key={chatMember.id}>
+                    <span className={`member-dot ${isOnline(chatMember) ? "online" : ""}`} />
+                    <span className="member-name">{chatMember.name}</span>
+                    <span className="member-status">{isOnline(chatMember) ? "онлайн" : "был(а) недавно"}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          </div>
+
+          <div className="family-note">
+            <div className="note-heart">♥</div>
+            <div>
+              <p>Уютное место для близких</p>
+              <span>Только для своих ♥</span>
+            </div>
+            <Pin className="note-pin" size={24} aria-hidden="true" />
+          </div>
+
+          <div className="messages-panel" ref={listRef}>
+            {visibleMessages.length === 0 ? (
+              <p className="empty-state">История хранится 15 дней, чтобы чат оставался лёгким, быстрым и приватным.</p>
+            ) : (
+              <div className="message-list">
+                {visibleMessages.map((message, index) => (
+                  <div className="message-item" key={message.id}>
+                  {shouldShowDateSeparator(visibleMessages, index) && (
+                    <div className="date-separator">{formatDateSeparator(message.created_at)}</div>
+                  )}
+                  {message.type === "system" ? (
+                  <div className="system-message">
+                    {message.text}
+                  </div>
+                  ) : (
+                  <article className="message-row">
+                    <div className="message-stack">
+                      <div className={`message-author ${message.member_id === member?.id ? "own" : ""}`}>
+                        {message.members?.name || "Семья"}
+                      </div>
+                        <div className={`message ${message.member_id === member?.id ? "own" : "other"} ${message.deleted_at ? "deleted" : ""} ${message.type === "image" ? "image" : ""}`}>
+                          {message.deleted_at ? (
+                            <span className="message-text">Сообщение удалено</span>
+                          ) : message.type === "image" ? (
+                            message.image_url ? (
+                              <button className="message-image-button" type="button" onClick={() => setImageViewerUrl(message.image_url || null)}>
+                                <img className="message-image" src={message.image_url} alt="Фото в чате" />
+                              </button>
+                            ) : (
+                              <span className="message-text">Фото недоступно</span>
+                            )
+                          ) : (
+                            <span className="message-text">{message.text}</span>
+                          )}
+                          <time className="message-time">{formatTime(message.created_at)}</time>
+                        </div>
+                        {!message.deleted_at && message.member_id === member?.id && (
+                          <button className="delete-message-button" type="button" onClick={() => setMessageToDelete(message)}>
+                            Удалить
+                          </button>
+                        )}
+                      </div>
+                    </article>
+                  )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            {sendError && <p className="error-text">{sendError}</p>}
+            <div className="composer">
+              <button
+                className="composer-smile emoji-toggle"
+                type="button"
+                aria-label="Quick emojis"
+                ref={emojiButtonRef}
+                onClick={() => setEmojiOpen((open) => !open)}
+              >
+                <Smile size={25} aria-hidden="true" />
+              </button>
+              {emojiOpen && (
+                <div className="quick-emoji-panel" ref={emojiPanelRef}>
+                  {QUICK_EMOJIS.map((emoji) => (
+                    <button
+                      aria-label={`Добавить ${emoji}`}
+                      className="quick-emoji"
+                      key={emoji}
+                      onClick={() => handleQuickEmoji(emoji)}
+                      type="button"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <textarea
+                className="message-input"
+                maxLength={MAX_MESSAGE_LENGTH}
+                placeholder="Написать сообщение..."
+                rows={1}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={handleMessageKeyDown}
+              />
+              <input
+                ref={imageInputRef}
+                className="sr-only"
+                type="file"
+                accept="image/jpeg,image/jpg,image/png,image/webp"
+                onChange={handleImageSelect}
+              />
+              <button
+                className="image-upload-button"
+                type="button"
+                aria-label="Добавить фото"
+                disabled={isUploadingImage}
+                onClick={() => imageInputRef.current?.click()}
+              >
+                <ImagePlus size={22} />
+              </button>
+              <button className="send-button" type="button" aria-label="Отправить" onClick={handleSend}>
+                <Send size={24} fill="currentColor" />
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {!member && (
+        <div className="name-backdrop">
+          {memberEntryMode === "choice" && (
+            <div className="name-modal">
+              <h2>Как войти?</h2>
+              <button className="primary-button" type="button" onClick={() => setMemberEntryMode("new")}>
+                Я новый участник
+              </button>
+              <button className="secondary-button" type="button" onClick={() => setMemberEntryMode("existing")}>
+                Я уже участник
+              </button>
+              {connectionError && <p className="error-text">{connectionError}</p>}
+            </div>
+          )}
+          {memberEntryMode !== "choice" && (
+          <form className="name-modal" onSubmit={handleCreateMember}>
+            <h2>Как вас зовут?</h2>
+            <label className="field-label" htmlFor="member-name">
+              Ваше имя
+            </label>
+            <input
+              className="text-input"
+              id="member-name"
+              autoComplete="name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+            <label className="field-label" htmlFor="member-pin">
+              PIN из 4 цифр
+            </label>
+            <input
+              className="text-input"
+              id="member-pin"
+              inputMode="numeric"
+              maxLength={4}
+              pattern="[0-9]{4}"
+              type="password"
+              value={pin}
+              onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 4))}
+            />
+            {memberEntryMode === "new" && (
+              <>
+                <label className="field-label" htmlFor="member-pin-confirm">
+                  Повторите PIN
+                </label>
+                <input
+                  className="text-input"
+                  id="member-pin-confirm"
+                  inputMode="numeric"
+                  maxLength={4}
+                  pattern="[0-9]{4}"
+                  type="password"
+                  value={pinConfirm}
+                  onChange={(event) => setPinConfirm(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                />
+              </>
+            )}
+            <p className="error-text">{nameError}</p>
+            <button className="primary-button" type="submit" disabled={isSavingMember}>
+              Войти в чат
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => {
+                setMemberEntryMode("choice");
+                setNameError("");
+                setPin("");
+                setPinConfirm("");
+              }}
+            >
+              Назад
+            </button>
+          </form>
+          )}
+        </div>
+      )}
+
+      {logoutOpen && (
+        <div className="logout-backdrop">
+          <div className="logout-modal">
+            <h2>Выйти из чата?</h2>
+            <p className="small-note">Чтобы вернуться, введите пароль и имя снова.</p>
+            <div className="logout-actions">
+              <button className="secondary-button" type="button" onClick={() => setLogoutOpen(false)}>
+                Остаться
+              </button>
+              <button className="primary-button" type="button" onClick={handleLogout}>
+                Выйти
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {messageToDelete && (
+        <div className="confirm-backdrop">
+          <div className="confirm-modal">
+            <h2>Удалить сообщение?</h2>
+            <p className="small-note">Это действие нельзя будет отменить.</p>
+            <div className="confirm-actions">
+              <button className="secondary-button" type="button" onClick={() => setMessageToDelete(null)}>
+                Отмена
+              </button>
+              <button className="primary-button" type="button" onClick={handleDeleteMessage}>
+                Удалить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {imageViewerUrl && (
+        <div className="image-viewer-backdrop" onClick={() => setImageViewerUrl(null)}>
+          <button className="image-viewer-close" type="button" aria-label="Закрыть фото">
+            ×
+          </button>
+          <img className="image-viewer" src={imageViewerUrl} alt="Фото в чате" />
+        </div>
+      )}
+    </main>
+  );
+}
+
+function formatTime(value: string) {
+  return new Intl.DateTimeFormat("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(value));
+}
+
+function shouldShowDateSeparator(messages: Message[], index: number) {
+  if (index === 0) return true;
+  return getDateKey(messages[index].created_at) !== getDateKey(messages[index - 1].created_at);
+}
+
+function formatDateSeparator(value: string) {
+  const key = getDateKey(value);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+
+  if (key === getDateKey(today.toISOString())) return "Сегодня";
+  if (key === getDateKey(yesterday.toISOString())) return "Вчера";
+
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  }).format(new Date(value));
+}
+
+function getDateKey(value: string) {
+  return new Intl.DateTimeFormat("sv-SE").format(new Date(value));
+}
+
+function isOnline(member: ChatMember) {
+  if (!member.last_seen_at) return false;
+  return Date.now() - new Date(member.last_seen_at).getTime() <= ONLINE_WINDOW_MS;
+}
+
+function isUnread(message: Message, memberId: string, lastReadAt: string) {
+  return (
+    message.type === "text" &&
+    !message.deleted_at &&
+    message.member_id !== memberId &&
+    new Date(message.created_at).getTime() > new Date(lastReadAt).getTime()
+  );
+}
+
+function formatMembersSummary(total: number, online: number) {
+  return `${total} ${pluralize(total, "участник", "участника", "участников")} · ${online} онлайн`;
+}
+
+function pluralize(count: number, one: string, few: string, many: string) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function InstallHelp({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="install-backdrop" onClick={onClose}>
+      <div className="install-modal" onClick={(event) => event.stopPropagation()}>
+        <h2>Добавить на телефон</h2>
+        <p className="small-note">
+          На Android установка появится автоматически, если браузер поддерживает PWA. На iPhone добавление делается
+          вручную через Safari.
+        </p>
+        <ol>
+          <li>Нажмите «Поделиться»</li>
+          <li>Выберите «На экран Домой»</li>
+          <li>Нажмите «Добавить»</li>
+        </ol>
+        <button className="secondary-button" type="button" onClick={onClose}>
+          <Share2 size={20} />
+          Понятно
+        </button>
+      </div>
+    </div>
+  );
+}
