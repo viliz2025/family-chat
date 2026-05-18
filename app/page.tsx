@@ -42,10 +42,12 @@ type Message = {
 
 const MEMBER_ID_KEY = "family_chat_member_id";
 const MEMBER_NAME_KEY = "family_chat_member_name";
+const NOTIFICATION_SOUND_KEY = "family_chat_notification_sound";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PIN_PATTERN = /^\d{4}$/;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const HEARTBEAT_MS = 45 * 1000;
+const MESSAGE_POLL_MS = 8 * 1000;
 const SYSTEM_MESSAGE_VISIBLE_MS = 5 * 1000;
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
 const IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
@@ -80,7 +82,7 @@ export default function HomePage() {
   const [membersOpen, setMembersOpen] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
-  const [lastReadAt, setLastReadAt] = useState<string | null>(null);
+  const [, setLastReadAt] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -91,17 +93,32 @@ export default function HomePage() {
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
   const [loadingSession, setLoadingSession] = useState(true);
   const [connectionError, setConnectionError] = useState("");
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const emojiPanelRef = useRef<HTMLDivElement | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const fetchingMessagesRef = useRef(false);
+  const pendingMessagesFetchRef = useRef(false);
+  const initialMessagesLoadedRef = useRef(false);
+  const knownMessageIdsRef = useRef<Set<string>>(new Set());
+  const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
+  const memberRef = useRef<Member | null>(null);
+  const fetchMessagesRef = useRef<(options?: { initial?: boolean; forceScroll?: boolean }) => void>(() => undefined);
+  const notificationSoundEnabledRef = useRef(false);
+  const scrollOnNextMessagesRef = useRef(false);
 
   const supabase = useMemo(() => createSupabaseBrowser(), []);
   const onlineCount = members.filter(isOnline).length;
-  const unreadCount = member && lastReadAt ? messages.filter((message) => isUnread(message, member.id, lastReadAt)).length : 0;
   const visibleMessages = messages.filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
+  fetchMessagesRef.current = fetchMessages;
 
   useEffect(() => {
+    const savedSoundPermission = localStorage.getItem(NOTIFICATION_SOUND_KEY) === "1";
+    setNotificationSoundEnabled(savedSoundPermission);
+    notificationSoundEnabledRef.current = savedSoundPermission;
+
     if ("serviceWorker" in navigator) {
       if (process.env.NODE_ENV === "production") {
         navigator.serviceWorker.register("/sw.js").catch(() => undefined);
@@ -189,11 +206,16 @@ export default function HomePage() {
   useEffect(() => {
     if (!authenticated || !chat) return;
     setMembersLoaded(false);
-    loadMessages();
+    setNewMessageCount(0);
+    initialMessagesLoadedRef.current = false;
+    knownMessageIdsRef.current = new Set();
+    notifiedMessageIdsRef.current = new Set();
+    fetchMessagesRef.current({ initial: true });
     loadMembers();
   }, [authenticated, chat]);
 
   useEffect(() => {
+    memberRef.current = member;
     if (!member) return;
     const currentMember = members.find((chatMember) => chatMember.id === member.id);
     if (currentMember?.last_read_at) setLastReadAt(currentMember.last_read_at);
@@ -225,20 +247,6 @@ export default function HomePage() {
       window.removeEventListener("focus", handleVisible);
     };
   }, [authenticated, member, messages.length]);
-
-  useEffect(() => {
-    const badgeNavigator = navigator as Navigator & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-      clearAppBadge?: () => Promise<void>;
-    };
-
-    if (unreadCount > 0) {
-      badgeNavigator.setAppBadge?.(unreadCount).catch(() => undefined);
-      return;
-    }
-
-    badgeNavigator.clearAppBadge?.().catch(() => undefined);
-  }, [unreadCount]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
@@ -291,7 +299,7 @@ export default function HomePage() {
           filter: `chat_id=eq.${chat.id}`
         },
         () => {
-          loadMessages();
+          fetchMessagesRef.current();
         }
       )
       .on(
@@ -303,7 +311,7 @@ export default function HomePage() {
           filter: `chat_id=eq.${chat.id}`
         },
         () => {
-          loadMessages();
+          fetchMessagesRef.current();
         }
       )
       .subscribe();
@@ -314,10 +322,48 @@ export default function HomePage() {
   }, [authenticated, chat, supabase]);
 
   useEffect(() => {
-    listRef.current?.scrollTo({
-      top: listRef.current.scrollHeight,
-      behavior: "smooth"
-    });
+    if (!authenticated || !member) return;
+
+    const intervalId = window.setInterval(() => fetchMessagesRef.current(), MESSAGE_POLL_MS);
+    const handleFocus = () => fetchMessagesRef.current();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") fetchMessagesRef.current();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("online", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("online", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [authenticated, member]);
+
+  useEffect(() => {
+    document.title = newMessageCount > 0 ? `(${newMessageCount}) Семейный чат` : "Семейный чат";
+  }, [newMessageCount]);
+
+  useEffect(() => {
+    const badgeNavigator = navigator as Navigator & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+
+    if (newMessageCount > 0) {
+      badgeNavigator.setAppBadge?.(newMessageCount).catch(() => undefined);
+      return;
+    }
+
+    badgeNavigator.clearAppBadge?.().catch(() => undefined);
+  }, [newMessageCount]);
+
+  useEffect(() => {
+    if (!scrollOnNextMessagesRef.current) return;
+    scrollOnNextMessagesRef.current = false;
+    scrollToLatestMessage();
   }, [visibleMessages.length]);
 
   function readStoredMember() {
@@ -456,11 +502,57 @@ export default function HomePage() {
     loadMembers();
   }
 
-  async function loadMessages() {
-    const response = await fetch("/api/messages");
-    if (!response.ok) return;
-    const data = await response.json();
-    setMessages(data.messages || []);
+  async function fetchMessages(options: { initial?: boolean; forceScroll?: boolean } = {}) {
+    if (fetchingMessagesRef.current) {
+      pendingMessagesFetchRef.current = true;
+      return;
+    }
+
+    fetchingMessagesRef.current = true;
+
+    try {
+      const response = await fetch("/api/messages");
+      if (!response.ok) return;
+      const data = await response.json();
+      const nextMessages = dedupeMessages(data.messages || []);
+      const isInitialLoad = options.initial || !initialMessagesLoadedRef.current;
+      const nextKnownIds = new Set(nextMessages.map((message) => message.id));
+      const currentMember = memberRef.current;
+      const newForeignMessages =
+        currentMember && !isInitialLoad
+          ? nextMessages.filter(
+              (message) =>
+                isNotifiableMessage(message, currentMember.id) &&
+                !knownMessageIdsRef.current.has(message.id) &&
+                !notifiedMessageIdsRef.current.has(message.id)
+            )
+          : [];
+
+      setMessages(nextMessages);
+      knownMessageIdsRef.current = nextKnownIds;
+
+      if (isInitialLoad) {
+        initialMessagesLoadedRef.current = true;
+        nextMessages.forEach((message) => notifiedMessageIdsRef.current.add(message.id));
+        scrollOnNextMessagesRef.current = true;
+        return;
+      }
+
+      if (options.forceScroll) scrollOnNextMessagesRef.current = true;
+
+      if (newForeignMessages.length === 0) return;
+
+      newForeignMessages.forEach((message) => notifiedMessageIdsRef.current.add(message.id));
+      setNewMessageCount((count) => count + newForeignMessages.length);
+      playNotificationCue();
+      navigator.vibrate?.(120);
+    } finally {
+      fetchingMessagesRef.current = false;
+      if (pendingMessagesFetchRef.current) {
+        pendingMessagesFetchRef.current = false;
+        fetchMessages();
+      }
+    }
   }
 
   async function loadMembers() {
@@ -502,9 +594,12 @@ export default function HomePage() {
     setDraft("");
     setEmojiOpen(false);
     loadMembers();
+    knownMessageIdsRef.current.add(data.message.id);
+    notifiedMessageIdsRef.current.add(data.message.id);
+    scrollOnNextMessagesRef.current = true;
     setMessages((current) => {
       if (current.some((message) => message.id === data.message.id)) return current;
-      return [...current, data.message];
+      return dedupeMessages([...current, data.message]);
     });
   }
 
@@ -586,9 +681,12 @@ export default function HomePage() {
     }
 
     loadMembers();
+    knownMessageIdsRef.current.add(data.message.id);
+    notifiedMessageIdsRef.current.add(data.message.id);
+    scrollOnNextMessagesRef.current = true;
     setMessages((current) => {
       if (current.some((message) => message.id === data.message.id)) return current;
-      return [...current, data.message];
+      return dedupeMessages([...current, data.message]);
     });
   }
 
@@ -630,6 +728,14 @@ export default function HomePage() {
     setEmojiOpen(false);
     setImageViewerUrl(null);
     setIsUploadingImage(false);
+    setNewMessageCount(0);
+    fetchingMessagesRef.current = false;
+    pendingMessagesFetchRef.current = false;
+    initialMessagesLoadedRef.current = false;
+    knownMessageIdsRef.current = new Set();
+    notifiedMessageIdsRef.current = new Set();
+    memberRef.current = null;
+    scrollOnNextMessagesRef.current = false;
   }
 
   async function handleDeleteMessage() {
@@ -665,6 +771,55 @@ export default function HomePage() {
     }
 
     setInstallHelpOpen(true);
+  }
+
+  function enableNotificationSound() {
+    localStorage.setItem(NOTIFICATION_SOUND_KEY, "1");
+    notificationSoundEnabledRef.current = true;
+    setNotificationSoundEnabled(true);
+    playNotificationCue();
+  }
+
+  function handleNewMessageClick() {
+    setNewMessageCount(0);
+    scrollOnNextMessagesRef.current = true;
+    scrollToLatestMessage();
+  }
+
+  function scrollToLatestMessage() {
+    requestAnimationFrame(() => {
+      listRef.current?.scrollTo({
+        top: listRef.current.scrollHeight,
+        behavior: "smooth"
+      });
+    });
+  }
+
+  function playNotificationCue() {
+    if (!notificationSoundEnabledRef.current) return;
+
+    try {
+      const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) return;
+
+      const audioContext = new AudioContextClass();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(740, audioContext.currentTime);
+      oscillator.frequency.exponentialRampToValueAtTime(980, audioContext.currentTime + 0.08);
+      gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.08, audioContext.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.16);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.18);
+      window.setTimeout(() => audioContext.close().catch(() => undefined), 250);
+    } catch {
+      // Browser audio permissions differ, so notification sound is best-effort.
+    }
   }
 
   if (loadingSession) {
@@ -759,7 +914,16 @@ export default function HomePage() {
           <button className="chat-subtitle members-toggle" type="button" onClick={() => setMembersOpen((open) => !open)}>
             <span /> {formatMembersSummary(members.length, onlineCount)}
           </button>
-          {unreadCount > 0 && <div className="unread-counter">{unreadCount} новых</div>}
+          {!notificationSoundEnabled && (
+            <button className="notification-sound-button" type="button" onClick={enableNotificationSound}>
+              Включить звук уведомлений
+            </button>
+          )}
+          {newMessageCount > 0 && (
+            <button className="new-message-banner" type="button" onClick={handleNewMessageClick}>
+              Новое сообщение {newMessageCount > 1 ? newMessageCount : ""}
+            </button>
+          )}
           {membersOpen && (
             <div className="members-panel">
               <p className="members-title">Кто в чате</p>
@@ -1056,12 +1220,17 @@ function isOnline(member: ChatMember) {
   return Date.now() - new Date(member.last_seen_at).getTime() <= ONLINE_WINDOW_MS;
 }
 
-function isUnread(message: Message, memberId: string, lastReadAt: string) {
+function isNotifiableMessage(message: Message, memberId: string) {
   return (
-    message.type === "text" &&
+    (message.type === "text" || message.type === "image") &&
     !message.deleted_at &&
-    message.member_id !== memberId &&
-    new Date(message.created_at).getTime() > new Date(lastReadAt).getTime()
+    message.member_id !== memberId
+  );
+}
+
+function dedupeMessages(messages: Message[]) {
+  return Array.from(new Map(messages.map((message) => [message.id, message])).values()).sort(
+    (first, second) => new Date(first.created_at).getTime() - new Date(second.created_at).getTime()
   );
 }
 

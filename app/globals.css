@@ -408,7 +408,8 @@ h1 {
   padding: 14px 16px;
 }
 
-.unread-counter {
+.new-message-banner,
+.notification-sound-button {
   width: fit-content;
   margin: 8px 0 0 58px;
   border: 1px solid rgba(223, 125, 95, 0.18);
@@ -419,6 +420,15 @@ h1 {
   font-size: 13px;
   font-weight: 800;
   padding: 6px 11px;
+}
+
+.new-message-banner {
+  background: rgba(255, 244, 231, 0.95);
+  box-shadow: 0 10px 20px rgba(205, 105, 75, 0.12);
+}
+
+.notification-sound-button {
+  color: var(--sage);
 }
 
 .members-title {
