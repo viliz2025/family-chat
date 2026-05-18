@@ -4,7 +4,7 @@ const password = process.argv[2];
 const pepper = process.env.FAMILY_CHAT_AUTH_PEPPER;
 
 if (!password) {
-  console.error("Usage: FAMILY_CHAT_AUTH_PEPPER=your-pepper npm run hash-password -- family123");
+  console.error('Usage: FAMILY_CHAT_AUTH_PEPPER=your-pepper npm run hash-password -- "<family-password>"');
   process.exit(1);
 }
 

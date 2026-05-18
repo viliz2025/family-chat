@@ -1,6 +1,6 @@
-# Семейный чат MVP 0
+# Семейный чат
 
-Минимальный семейный веб-чат: вход по общему паролю, имя участника в `localStorage`, текстовые сообщения, Supabase Realtime, автоочистка истории и PWA-иконка для главного экрана телефона.
+Приватный семейный веб-чат на Next.js и Supabase: вход по общему паролю, участники с PIN, текстовые сообщения, фото, быстрые emoji, удаление своих сообщений, онлайн-статусы, список участников, даты в истории, счетчик новых сообщений, устойчивая локальная сессия и PWA-иконка для главного экрана телефона.
 
 ## Бесплатные инструменты
 
@@ -14,7 +14,7 @@
 
 ```bash
 npm install
-cp env.example .env.local
+cp .env.example .env.local
 npm run dev
 ```
 
@@ -41,7 +41,7 @@ FAMILY_CHAT_AUTH_PEPPER=replace-with-a-long-random-pepper
 4. Сгенерируйте hash пароля:
 
 ```bash
-FAMILY_CHAT_AUTH_PEPPER="тот-же-pepper" npm run hash-password -- family123
+FAMILY_CHAT_AUTH_PEPPER="тот-же-pepper" npm run hash-password -- "<семейный-пароль>"
 ```
 
 5. Вставьте hash в `supabase/seed.sql` вместо `PASTE_GENERATED_HASH_HERE`.
@@ -86,10 +86,11 @@ curl -X POST http://localhost:3000/api/cleanup
 
 1. Запустите проект.
 2. Откройте сайт в двух вкладках или на двух устройствах.
-3. Введите пароль `family123`, если вы использовали его при генерации hash.
-4. Введите разные имена.
-5. Отправьте сообщение в первой вкладке.
-6. Во второй вкладке сообщение должно появиться без перезагрузки.
+3. Введите семейный пароль, который передан участникам отдельно.
+4. Создайте участника с именем и PIN из 4 цифр или войдите в существующего участника по имени и PIN.
+5. Отправьте текст, emoji или фото в первой вкладке.
+6. Во второй вкладке сообщение должно появиться без перезагрузки; в списке участников должны обновляться онлайн-статусы.
+7. Проверьте удаление своего сообщения, разделители дат и сохранение входа после обновления страницы.
 
 ## PWA и иконки
 
@@ -111,28 +112,19 @@ Manifest находится в `public/manifest.json`.
 5. Output оставьте стандартным для Next.js.
 6. Deploy.
 
-## Команды для первого GitHub-коммита
-
-```bash
-git init
-git add .
-git commit -m "Create family chat MVP 0"
-git branch -M main
-git remote add origin YOUR_REPOSITORY_URL
-git push -u origin main
-```
-
 ## Архитектура
 
-- `app/page.tsx` — mobile-first UI входа, имени участника, чата и PWA-инструкции.
+- `app/page.tsx` — mobile-first UI входа, PIN-участников, чата, фото, emoji, удаления, списка участников и PWA-инструкции.
 - `app/api/auth` — проверка пароля на сервере, без отдачи `password_hash` клиенту.
-- `app/api/members` — создание участника после входа.
-- `app/api/messages` — серверные чтение и отправка текстовых сообщений.
+- `app/api/members` — создание и восстановление участника по PIN, обновление `last_seen_at` и `last_read_at`.
+- `app/api/messages` — серверные чтение, отправка текста, подготовка загрузки фото и мягкое удаление сообщений.
 - `app/api/cleanup` — cron-ready ручка для очистки истории.
 - `lib/password.ts` — PBKDF2 hash/verify с server-side pepper.
-- `supabase/schema.sql` — таблицы, индексы, realtime publication и cleanup-функция.
+- `lib/member-pin.ts` — hash/verify PIN участников.
+- `lib/session.ts` — signed-cookie сессия входа в общий чат.
+- `supabase/schema.sql` — таблицы, индексы, realtime publication, cleanup-функция и приватный Storage bucket для фото.
 - `supabase/seed.sql` — создание одного семейного чата.
 
-## За пределами MVP 0
+## Ограничения
 
-Не реализованы фото, видео, голосовые, файлы, аватарки, регистрация, роли, админка, несколько чатов, email, Telegram, push-уведомления, оплата, календарь и мобильные приложения через App Store / Google Play.
+Не реализованы видео, голосовые, файлы кроме фото, аватарки, роли, админка, несколько чатов, email, Telegram, push-уведомления, оплата, календарь и мобильные приложения через App Store / Google Play.
