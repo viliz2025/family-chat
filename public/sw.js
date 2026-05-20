@@ -42,7 +42,12 @@ self.addEventListener("push", (event) => {
     }
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    Promise.all([
+      self.registration.showNotification(title, options),
+      "setAppBadge" in self.registration ? self.registration.setAppBadge(1).catch(() => undefined) : Promise.resolve()
+    ])
+  );
 });
 
 self.addEventListener("notificationclick", (event) => {
@@ -51,10 +56,13 @@ self.addEventListener("notificationclick", (event) => {
   const url = new URL(event.notification.data?.url || "/", self.location.origin).href;
 
   event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
-      const existingClient = clients.find((client) => client.url === url);
-      if (existingClient) return existingClient.focus();
-      return self.clients.openWindow(url);
-    })
+    Promise.all([
+      "clearAppBadge" in self.registration ? self.registration.clearAppBadge().catch(() => undefined) : Promise.resolve(),
+      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+        const existingClient = clients.find((client) => client.url === url);
+        if (existingClient) return existingClient.focus();
+        return self.clients.openWindow(url);
+      })
+    ])
   );
 });

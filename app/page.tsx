@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, Eye, Heart, ImagePlus, Lock, Pin, Plus, Send, Share2, Smile } from "lucide-react";
 import { createSupabaseBrowser } from "@/lib/supabase-browser";
 import { MAX_MESSAGE_LENGTH } from "@/lib/validation";
@@ -114,6 +114,7 @@ export default function HomePage() {
   const scrollOnNextMessagesRef = useRef(false);
   const entryScrollPendingRef = useRef(false);
   const entryReadSyncedRef = useRef(false);
+  const entryUnreadPendingRef = useRef(false);
   const pushNoticeTimeoutRef = useRef<number | null>(null);
 
   const supabase = useMemo(() => createSupabaseBrowser(), []);
@@ -121,7 +122,48 @@ export default function HomePage() {
   const chatId = chat?.id;
   const onlineCount = members.filter(isOnline).length;
   const visibleMessages = dedupeMessages(messages).filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
+  const firstUnreadMessage = member ? findFirstUnreadMessage(visibleMessages, member.id, lastReadAt) : null;
   fetchMessagesRef.current = fetchMessages;
+
+  const clearAppBadgeCount = useCallback(() => {
+    const badgeNavigator = navigator as Navigator & {
+      clearAppBadge?: () => Promise<void>;
+    };
+    badgeNavigator.clearAppBadge?.().catch(() => undefined);
+  }, []);
+
+  const setAppBadgeCount = useCallback((count: number) => {
+    const badgeNavigator = navigator as Navigator & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    if (count > 0) {
+      badgeNavigator.setAppBadge?.(count).catch(() => undefined);
+      return;
+    }
+    badgeNavigator.clearAppBadge?.().catch(() => undefined);
+  }, []);
+
+  const clearUnreadIndicators = useCallback(() => {
+    setNewMessageCount(0);
+    clearAppBadgeCount();
+  }, [clearAppBadgeCount]);
+
+  const markChatRead = useCallback(async () => {
+    if (!member || document.hidden) return;
+
+    const readAt = new Date().toISOString();
+    setLastReadAt(readAt);
+    entryReadSyncedRef.current = true;
+    entryUnreadPendingRef.current = false;
+    clearUnreadIndicators();
+
+    await fetch("/api/members", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ member_id: member.id, mark_read: true })
+    }).catch(() => undefined);
+  }, [member, clearUnreadIndicators]);
 
   useEffect(() => {
     const savedSoundPermission = localStorage.getItem(NOTIFICATION_SOUND_KEY) === "1";
@@ -234,9 +276,10 @@ export default function HomePage() {
     notifiedMessageIdsRef.current = new Set();
     entryScrollPendingRef.current = true;
     entryReadSyncedRef.current = false;
+    entryUnreadPendingRef.current = false;
     fetchMessagesRef.current({ initial: true });
     loadMembers();
-  }, [authenticated, chat]);
+  }, [authenticated, chat, clearUnreadIndicators]);
 
   useEffect(() => {
     if (!authenticated || !memberId || !chatId) {
@@ -273,24 +316,15 @@ export default function HomePage() {
     memberRef.current = member;
     if (!member) return;
     const currentMember = members.find((chatMember) => chatMember.id === member.id);
-    if (currentMember?.last_read_at) setLastReadAt(currentMember.last_read_at);
+    setLastReadAt((current) => getLatestTimestamp(current, currentMember?.last_read_at ?? null));
   }, [member, members]);
 
   useEffect(() => {
     if (!authenticated || !member || !membersLoaded || !entryScrollSettled) return;
 
-    const markRead = async () => {
-      if (document.hidden) return;
-      if (entryReadSyncedRef.current && !isMessagesPanelNearBottom()) return;
-      const readAt = new Date().toISOString();
-      setLastReadAt(readAt);
-      entryReadSyncedRef.current = true;
-      clearUnreadIndicators();
-      await fetch("/api/members", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ member_id: member.id, mark_read: true })
-      }).catch(() => undefined);
+    const markRead = () => {
+      if (entryUnreadPendingRef.current || !isMessagesPanelNearBottom()) return;
+      markChatRead();
     };
 
     markRead();
@@ -304,7 +338,7 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisible);
       window.removeEventListener("focus", handleVisible);
     };
-  }, [authenticated, member, membersLoaded, entryScrollSettled, visibleMessages.length]);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, visibleMessages.length, markChatRead]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
@@ -405,18 +439,13 @@ export default function HomePage() {
   }, [newMessageCount]);
 
   useEffect(() => {
-    const badgeNavigator = navigator as Navigator & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-      clearAppBadge?: () => Promise<void>;
-    };
-
     if (newMessageCount > 0) {
-      badgeNavigator.setAppBadge?.(newMessageCount).catch(() => undefined);
+      setAppBadgeCount(newMessageCount);
       return;
     }
 
-    badgeNavigator.clearAppBadge?.().catch(() => undefined);
-  }, [newMessageCount]);
+    clearAppBadgeCount();
+  }, [newMessageCount, setAppBadgeCount, clearAppBadgeCount]);
 
   useEffect(() => {
     if (!scrollOnNextMessagesRef.current) return;
@@ -432,30 +461,29 @@ export default function HomePage() {
 
     const handleScroll = () => {
       if (document.visibilityState === "visible" && isMessagesPanelNearBottom()) {
-        clearUnreadIndicators();
+        markChatRead();
       }
     };
 
     panel.addEventListener("scroll", handleScroll, { passive: true });
     handleScroll();
     return () => panel.removeEventListener("scroll", handleScroll);
-  }, [authenticated, member, entryScrollSettled, visibleMessages.length]);
+  }, [authenticated, member, entryScrollSettled, visibleMessages.length, markChatRead]);
 
   useEffect(() => {
     if (!authenticated || !member || !membersLoaded || entryScrollSettled || !entryScrollPendingRef.current) return;
     if (!initialMessagesLoadedRef.current) return;
 
     entryScrollPendingRef.current = false;
-    const firstUnreadMessage = lastReadAt
-      ? visibleMessages.find((message) => isEntryUnread(message, member.id, lastReadAt))
-      : null;
 
     if (firstUnreadMessage) {
+      entryUnreadPendingRef.current = true;
       scrollToMessage(firstUnreadMessage.id, () => setEntryScrollSettled(true));
     } else {
+      entryUnreadPendingRef.current = false;
       scrollToLatestMessage(() => setEntryScrollSettled(true));
     }
-  }, [authenticated, member, membersLoaded, entryScrollSettled, lastReadAt, visibleMessages]);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, firstUnreadMessage, visibleMessages]);
 
   function readStoredMember() {
     const id = localStorage.getItem(MEMBER_ID_KEY);
@@ -836,6 +864,7 @@ export default function HomePage() {
     scrollOnNextMessagesRef.current = false;
     entryScrollPendingRef.current = false;
     entryReadSyncedRef.current = false;
+    entryUnreadPendingRef.current = false;
   }
 
   async function handleDeleteMessage() {
@@ -878,14 +907,6 @@ export default function HomePage() {
     notificationSoundEnabledRef.current = true;
     setNotificationSoundEnabled(true);
     playNotificationCue();
-  }
-
-  function clearUnreadIndicators() {
-    setNewMessageCount(0);
-    const badgeNavigator = navigator as Navigator & {
-      clearAppBadge?: () => Promise<void>;
-    };
-    badgeNavigator.clearAppBadge?.().catch(() => undefined);
   }
 
   function showPushNotice(message: string, autoHide = true) {
@@ -988,10 +1009,15 @@ export default function HomePage() {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const messageElement = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
-        messageElement?.scrollIntoView({
-          block: "start",
-          behavior: "smooth"
-        });
+        const panel = listRef.current;
+        if (messageElement && panel) {
+          const panelRect = panel.getBoundingClientRect();
+          const messageRect = messageElement.getBoundingClientRect();
+          panel.scrollTo({
+            top: Math.max(panel.scrollTop + messageRect.top - panelRect.top - 8, 0),
+            behavior: "smooth"
+          });
+        }
         afterScroll?.();
       });
     });
@@ -1267,6 +1293,9 @@ export default function HomePage() {
                   {shouldShowDateSeparator(visibleMessages, index) && (
                     <div className="date-separator">{formatDateSeparator(message.created_at)}</div>
                   )}
+                  {firstUnreadMessage?.id === message.id && (
+                    <div className="unread-separator">Непрочитанные сообщения</div>
+                  )}
                   {message.type === "system" ? (
                   <div className="system-message">
                     {message.text}
@@ -1471,8 +1500,20 @@ function isNotifiableMessage(message: Message, memberId: string) {
   );
 }
 
-function isEntryUnread(message: Message, memberId: string, lastReadAt: string) {
-  return isNotifiableMessage(message, memberId) && new Date(message.created_at).getTime() > new Date(lastReadAt).getTime();
+function findFirstUnreadMessage(messages: Message[], memberId: string, lastReadAt: string | null) {
+  return messages.find((message) => isEntryUnread(message, memberId, lastReadAt)) ?? null;
+}
+
+function isEntryUnread(message: Message, memberId: string, lastReadAt: string | null) {
+  if (!isNotifiableMessage(message, memberId)) return false;
+  if (!lastReadAt) return true;
+  return new Date(message.created_at).getTime() > new Date(lastReadAt).getTime();
+}
+
+function getLatestTimestamp(first: string | null, second: string | null) {
+  if (!first) return second;
+  if (!second) return first;
+  return new Date(first).getTime() >= new Date(second).getTime() ? first : second;
 }
 
 function dedupeMessages(messages: Message[]) {
