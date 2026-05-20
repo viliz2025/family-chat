@@ -1,7 +1,7 @@
 "use client";
 
 import { type ChangeEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Eye, Heart, ImagePlus, Lock, Pin, Plus, Send, Share2, Smile } from "lucide-react";
+import { Bell, Eye, Heart, ImagePlus, Lock, Pin, Plus, Send, Share2, Smile } from "lucide-react";
 import { createSupabaseBrowser } from "@/lib/supabase-browser";
 import { MAX_MESSAGE_LENGTH } from "@/lib/validation";
 
@@ -91,10 +91,12 @@ export default function HomePage() {
   const [now, setNow] = useState(() => Date.now());
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
-  const [loadingSession, setLoadingSession] = useState(true);
+  const [loadingSession, setLoadingSession] = useState(false);
   const [connectionError, setConnectionError] = useState("");
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
+  const [pushStatus, setPushStatus] = useState("Push: permission не проверен; service worker не проверен; subscription не проверена");
+  const [isEnablingPush, setIsEnablingPush] = useState(false);
   const [entryScrollSettled, setEntryScrollSettled] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const emojiPanelRef = useRef<HTMLDivElement | null>(null);
@@ -127,6 +129,9 @@ export default function HomePage() {
       } else {
         navigator.serviceWorker.getRegistrations().then((registrations) => {
           registrations.forEach((registration) => registration.unregister());
+        });
+        caches.keys().then((keys) => {
+          keys.forEach((key) => caches.delete(key));
         });
       }
     }
@@ -172,6 +177,14 @@ export default function HomePage() {
         if (response.ok) {
           const data = await response.json();
           if (data.authenticated) {
+            if (!storedMember) {
+              setAuthenticated(false);
+              setChat(null);
+              setMember(null);
+              setConnectionError("");
+              setLoginError("");
+              return;
+            }
             if (!data.chat) {
               setConnectionError(data.error || "Не удалось подключиться к чату. Попробуйте обновить страницу.");
               setLoginError(data.error || "Не удалось подключиться к чату. Попробуйте обновить страницу.");
@@ -179,10 +192,8 @@ export default function HomePage() {
             }
             setAuthenticated(true);
             setChat(data.chat);
-            if (storedMember) {
-              setMember(storedMember);
-              verifyStoredMember(storedMember);
-            }
+            setMember(storedMember);
+            verifyStoredMember(storedMember);
           } else if (storedMember) {
             setConnectionError("Сессия входа устарела. Введите общий пароль снова.");
             setLoginError("Сессия входа устарела. Введите общий пароль снова.");
@@ -803,6 +814,68 @@ export default function HomePage() {
     playNotificationCue();
   }
 
+  async function enablePushNotifications() {
+    if (!member || !chat) return;
+
+    setIsEnablingPush(true);
+
+    try {
+      if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+        setPushStatus("Push: permission не поддерживается; service worker недоступен; subscription невозможна");
+        return;
+      }
+
+      const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
+      if (!vapidPublicKey) {
+        setPushStatus(`Push: permission ${Notification.permission}; service worker не проверен; subscription нет VAPID public key`);
+        return;
+      }
+
+      let permission = Notification.permission;
+      if (permission === "default") {
+        permission = await Notification.requestPermission();
+      }
+
+      if (permission !== "granted") {
+        setPushStatus(`Push: permission ${permission}; service worker не проверен; subscription не создана`);
+        return;
+      }
+
+      const registration = await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.ready;
+      let subscription = await registration.pushManager.getSubscription();
+
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidPublicKey)
+        });
+      }
+
+      const response = await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          member_id: member.id,
+          chat_id: chat.id,
+          subscription: subscription.toJSON()
+        })
+      });
+
+      if (!response.ok) {
+        setPushStatus(`Push: permission ${permission}; service worker ok; subscription не сохранена`);
+        return;
+      }
+
+      setPushStatus(`Push: permission ${permission}; service worker ok; subscription сохранена`);
+    } catch {
+      const permission = "Notification" in window ? Notification.permission : "unsupported";
+      setPushStatus(`Push: permission ${permission}; service worker ошибка; subscription ошибка`);
+    } finally {
+      setIsEnablingPush(false);
+    }
+  }
+
   function handleNewMessageClick() {
     setNewMessageCount(0);
     scrollOnNextMessagesRef.current = true;
@@ -853,6 +926,85 @@ export default function HomePage() {
     } catch {
       // Browser audio permissions differ, so notification sound is best-effort.
     }
+  }
+
+  function renderMemberEntryPrompt() {
+    if (memberEntryMode === "choice") {
+      return (
+        <div className="name-modal">
+          <h2>Как войти?</h2>
+          <button className="primary-button" type="button" onClick={() => setMemberEntryMode("new")}>
+            Я новый участник
+          </button>
+          <button className="secondary-button" type="button" onClick={() => setMemberEntryMode("existing")}>
+            Я уже участник
+          </button>
+          {connectionError && <p className="error-text">{connectionError}</p>}
+        </div>
+      );
+    }
+
+    return (
+      <form className="name-modal" onSubmit={handleCreateMember}>
+        <h2>Как вас зовут?</h2>
+        <label className="field-label" htmlFor="member-name">
+          Ваше имя
+        </label>
+        <input
+          className="text-input"
+          id="member-name"
+          autoComplete="name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <label className="field-label" htmlFor="member-pin">
+          PIN из 4 цифр
+        </label>
+        <input
+          className="text-input"
+          id="member-pin"
+          inputMode="numeric"
+          maxLength={4}
+          pattern="[0-9]{4}"
+          type="password"
+          value={pin}
+          onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 4))}
+        />
+        {memberEntryMode === "new" && (
+          <>
+            <label className="field-label" htmlFor="member-pin-confirm">
+              Повторите PIN
+            </label>
+            <input
+              className="text-input"
+              id="member-pin-confirm"
+              inputMode="numeric"
+              maxLength={4}
+              pattern="[0-9]{4}"
+              type="password"
+              value={pinConfirm}
+              onChange={(event) => setPinConfirm(event.target.value.replace(/\D/g, "").slice(0, 4))}
+            />
+          </>
+        )}
+        <p className="error-text">{nameError}</p>
+        <button className="primary-button" type="submit" disabled={isSavingMember}>
+          Войти в чат
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => {
+            setMemberEntryMode("choice");
+            setNameError("");
+            setPin("");
+            setPinConfirm("");
+          }}
+        >
+          Назад
+        </button>
+      </form>
+    );
   }
 
   if (loadingSession) {
@@ -918,6 +1070,16 @@ export default function HomePage() {
     );
   }
 
+  if (!member) {
+    return (
+      <main className="app-shell">
+        <div className="phone-frame login-frame">
+          <section className="screen login-screen">{renderMemberEntryPrompt()}</section>
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <div className="phone-frame chat-frame">
@@ -951,6 +1113,15 @@ export default function HomePage() {
             <button className="notification-sound-button" type="button" onClick={enableNotificationSound}>
               Включить звук уведомлений
             </button>
+          )}
+          {member && (
+            <>
+              <button className="notification-sound-button" type="button" onClick={enablePushNotifications} disabled={isEnablingPush}>
+                <Bell size={18} />
+                {isEnablingPush ? "Включаем push..." : "Включить push-уведомления"}
+              </button>
+              <p className="install-hint">{pushStatus}</p>
+            </>
           )}
           {newMessageCount > 0 && (
             <button className="new-message-banner" type="button" onClick={handleNewMessageClick}>
@@ -1092,84 +1263,6 @@ export default function HomePage() {
         </section>
       </div>
 
-      {!member && (
-        <div className="name-backdrop">
-          {memberEntryMode === "choice" && (
-            <div className="name-modal">
-              <h2>Как войти?</h2>
-              <button className="primary-button" type="button" onClick={() => setMemberEntryMode("new")}>
-                Я новый участник
-              </button>
-              <button className="secondary-button" type="button" onClick={() => setMemberEntryMode("existing")}>
-                Я уже участник
-              </button>
-              {connectionError && <p className="error-text">{connectionError}</p>}
-            </div>
-          )}
-          {memberEntryMode !== "choice" && (
-          <form className="name-modal" onSubmit={handleCreateMember}>
-            <h2>Как вас зовут?</h2>
-            <label className="field-label" htmlFor="member-name">
-              Ваше имя
-            </label>
-            <input
-              className="text-input"
-              id="member-name"
-              autoComplete="name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-            <label className="field-label" htmlFor="member-pin">
-              PIN из 4 цифр
-            </label>
-            <input
-              className="text-input"
-              id="member-pin"
-              inputMode="numeric"
-              maxLength={4}
-              pattern="[0-9]{4}"
-              type="password"
-              value={pin}
-              onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 4))}
-            />
-            {memberEntryMode === "new" && (
-              <>
-                <label className="field-label" htmlFor="member-pin-confirm">
-                  Повторите PIN
-                </label>
-                <input
-                  className="text-input"
-                  id="member-pin-confirm"
-                  inputMode="numeric"
-                  maxLength={4}
-                  pattern="[0-9]{4}"
-                  type="password"
-                  value={pinConfirm}
-                  onChange={(event) => setPinConfirm(event.target.value.replace(/\D/g, "").slice(0, 4))}
-                />
-              </>
-            )}
-            <p className="error-text">{nameError}</p>
-            <button className="primary-button" type="submit" disabled={isSavingMember}>
-              Войти в чат
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => {
-                setMemberEntryMode("choice");
-                setNameError("");
-                setPin("");
-                setPinConfirm("");
-              }}
-            >
-              Назад
-            </button>
-          </form>
-          )}
-        </div>
-      )}
-
       {logoutOpen && (
         <div className="logout-backdrop">
           <div className="logout-modal">
@@ -1214,6 +1307,19 @@ export default function HomePage() {
       )}
     </main>
   );
+}
+
+function urlBase64ToUint8Array(value: string) {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const base64 = `${value}${padding}`.replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let index = 0; index < rawData.length; index += 1) {
+    outputArray[index] = rawData.charCodeAt(index);
+  }
+
+  return outputArray;
 }
 
 function formatTime(value: string) {
