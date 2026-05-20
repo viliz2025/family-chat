@@ -95,7 +95,8 @@ export default function HomePage() {
   const [connectionError, setConnectionError] = useState("");
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
-  const [pushStatus, setPushStatus] = useState("Push: permission не проверен; service worker не проверен; subscription не проверена");
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushNotice, setPushNotice] = useState("");
   const [isEnablingPush, setIsEnablingPush] = useState(false);
   const [entryScrollSettled, setEntryScrollSettled] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -112,8 +113,11 @@ export default function HomePage() {
   const notificationSoundEnabledRef = useRef(false);
   const scrollOnNextMessagesRef = useRef(false);
   const entryScrollPendingRef = useRef(false);
+  const pushNoticeTimeoutRef = useRef<number | null>(null);
 
   const supabase = useMemo(() => createSupabaseBrowser(), []);
+  const memberId = member?.id;
+  const chatId = chat?.id;
   const onlineCount = members.filter(isOnline).length;
   const visibleMessages = messages.filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
   fetchMessagesRef.current = fetchMessages;
@@ -142,7 +146,10 @@ export default function HomePage() {
     };
 
     window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
-    return () => window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      if (pushNoticeTimeoutRef.current) window.clearTimeout(pushNoticeTimeoutRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -228,6 +235,37 @@ export default function HomePage() {
     fetchMessagesRef.current({ initial: true });
     loadMembers();
   }, [authenticated, chat]);
+
+  useEffect(() => {
+    if (!authenticated || !memberId || !chatId) {
+      setPushEnabled(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const checkExistingPushSubscription = async () => {
+      if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
+        if (!cancelled) setPushEnabled(false);
+        return;
+      }
+
+      if (Notification.permission !== "granted") {
+        if (!cancelled) setPushEnabled(false);
+        return;
+      }
+
+      const registration = await navigator.serviceWorker.getRegistration("/sw.js").catch(() => null);
+      const subscription = await registration?.pushManager.getSubscription().catch(() => null);
+      if (!cancelled) setPushEnabled(Boolean(subscription));
+    };
+
+    checkExistingPushSubscription();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, memberId, chatId]);
 
   useEffect(() => {
     memberRef.current = member;
@@ -377,6 +415,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!scrollOnNextMessagesRef.current) return;
+    if (entryScrollPendingRef.current) return;
     scrollOnNextMessagesRef.current = false;
     scrollToLatestMessage();
   }, [visibleMessages.length]);
@@ -814,20 +853,36 @@ export default function HomePage() {
     playNotificationCue();
   }
 
+  function showPushNotice(message: string, autoHide = true) {
+    if (pushNoticeTimeoutRef.current) {
+      window.clearTimeout(pushNoticeTimeoutRef.current);
+      pushNoticeTimeoutRef.current = null;
+    }
+
+    setPushNotice(message);
+    if (!autoHide) return;
+
+    pushNoticeTimeoutRef.current = window.setTimeout(() => {
+      setPushNotice("");
+      pushNoticeTimeoutRef.current = null;
+    }, 4000);
+  }
+
   async function enablePushNotifications() {
     if (!member || !chat) return;
 
     setIsEnablingPush(true);
+    setPushNotice("");
 
     try {
       if (!("Notification" in window) || !("serviceWorker" in navigator) || !("PushManager" in window)) {
-        setPushStatus("Push: permission не поддерживается; service worker недоступен; subscription невозможна");
+        showPushNotice("Оповещения не поддерживаются");
         return;
       }
 
       const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
       if (!vapidPublicKey) {
-        setPushStatus(`Push: permission ${Notification.permission}; service worker не проверен; subscription нет VAPID public key`);
+        showPushNotice("Не удалось включить оповещения");
         return;
       }
 
@@ -837,7 +892,7 @@ export default function HomePage() {
       }
 
       if (permission !== "granted") {
-        setPushStatus(`Push: permission ${permission}; service worker не проверен; subscription не создана`);
+        showPushNotice("Оповещения запрещены в браузере");
         return;
       }
 
@@ -863,14 +918,14 @@ export default function HomePage() {
       });
 
       if (!response.ok) {
-        setPushStatus(`Push: permission ${permission}; service worker ok; subscription не сохранена`);
+        showPushNotice("Не удалось включить оповещения");
         return;
       }
 
-      setPushStatus(`Push: permission ${permission}; service worker ok; subscription сохранена`);
+      setPushEnabled(true);
+      showPushNotice("Оповещения включены");
     } catch {
-      const permission = "Notification" in window ? Notification.permission : "unsupported";
-      setPushStatus(`Push: permission ${permission}; service worker ошибка; subscription ошибка`);
+      showPushNotice("Не удалось включить оповещения");
     } finally {
       setIsEnablingPush(false);
     }
@@ -884,19 +939,23 @@ export default function HomePage() {
 
   function scrollToLatestMessage() {
     requestAnimationFrame(() => {
-      listRef.current?.scrollTo({
-        top: listRef.current.scrollHeight,
-        behavior: "smooth"
+      requestAnimationFrame(() => {
+        listRef.current?.scrollTo({
+          top: listRef.current.scrollHeight,
+          behavior: "smooth"
+        });
       });
     });
   }
 
   function scrollToMessage(messageId: string) {
     requestAnimationFrame(() => {
-      const messageElement = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
-      messageElement?.scrollIntoView({
-        block: "start",
-        behavior: "smooth"
+      requestAnimationFrame(() => {
+        const messageElement = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+        messageElement?.scrollIntoView({
+          block: "start",
+          behavior: "smooth"
+        });
       });
     });
   }
@@ -1114,13 +1173,15 @@ export default function HomePage() {
               Включить звук уведомлений
             </button>
           )}
-          {member && (
+          {member && (!pushEnabled || pushNotice) && (
             <>
-              <button className="notification-sound-button" type="button" onClick={enablePushNotifications} disabled={isEnablingPush}>
-                <Bell size={18} />
-                {isEnablingPush ? "Включаем push..." : "Включить push-уведомления"}
-              </button>
-              <p className="install-hint">{pushStatus}</p>
+              {!pushEnabled && (
+                <button className="notification-sound-button" type="button" onClick={enablePushNotifications} disabled={isEnablingPush}>
+                  <Bell size={18} />
+                  {isEnablingPush ? "Включаем..." : "Включить push-уведомления"}
+                </button>
+              )}
+              {pushNotice && <p className="install-hint">{pushNotice}</p>}
             </>
           )}
           {newMessageCount > 0 && (
