@@ -135,18 +135,20 @@ export default function HomePage() {
       clearAppBadge?: () => Promise<void>;
     };
     badgeNavigator.clearAppBadge?.().catch(() => undefined);
-  }, []);
+    if (process.env.NODE_ENV !== "production") console.debug("[badge] clearAppBadge");
 
-  const setAppBadgeCount = useCallback((count: number) => {
-    const badgeNavigator = navigator as Navigator & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-      clearAppBadge?: () => Promise<void>;
-    };
-    if (count > 0) {
-      badgeNavigator.setAppBadge?.(count).catch(() => undefined);
-      return;
-    }
-    badgeNavigator.clearAppBadge?.().catch(() => undefined);
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.ready
+      .then((registration) => {
+        registration.active?.postMessage({ type: "family-chat-clear-badge" });
+        return registration.getNotifications?.({ tag: "family-chat-new-message" });
+      })
+      .then((notifications) => {
+        if (!notifications) return;
+        notifications.forEach((notification) => notification.close());
+        if (process.env.NODE_ENV !== "production") console.debug("[badge] closed notifications", notifications.length);
+      })
+      .catch(() => undefined);
   }, []);
 
   const clearUnreadIndicators = useCallback(() => {
@@ -511,13 +513,8 @@ export default function HomePage() {
   }, [newMessageCount]);
 
   useEffect(() => {
-    if (newMessageCount > 0) {
-      setAppBadgeCount(newMessageCount);
-      return;
-    }
-
-    clearAppBadgeCount();
-  }, [newMessageCount, setAppBadgeCount, clearAppBadgeCount]);
+    if (newMessageCount === 0) clearAppBadgeCount();
+  }, [newMessageCount, clearAppBadgeCount]);
 
   useEffect(() => {
     if (!scrollOnNextMessagesRef.current) return;
