@@ -589,6 +589,14 @@ h1 {
   box-shadow: 0 8px 16px rgba(205, 105, 75, 0.1);
 }
 
+.unread-anchor {
+  display: grid;
+}
+
+.bottom-anchor {
+  height: 1px;
+}
+
 .empty-state {
   margin: 18vh auto 0;
   max-width: 310px;

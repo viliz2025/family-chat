@@ -42,12 +42,7 @@ self.addEventListener("push", (event) => {
     }
   };
 
-  event.waitUntil(
-    Promise.all([
-      self.registration.showNotification(title, options),
-      "setAppBadge" in self.registration ? self.registration.setAppBadge(1).catch(() => undefined) : Promise.resolve()
-    ])
-  );
+  event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener("notificationclick", (event) => {

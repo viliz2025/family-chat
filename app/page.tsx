@@ -99,7 +99,11 @@ export default function HomePage() {
   const [pushNotice, setPushNotice] = useState("");
   const [isEnablingPush, setIsEnablingPush] = useState(false);
   const [entryScrollSettled, setEntryScrollSettled] = useState(false);
+  const [unreadDividerMessageId, setUnreadDividerMessageId] = useState<string | null>(null);
+  const [unreadDividerHoldUntil, setUnreadDividerHoldUntil] = useState(0);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const unreadAnchorRef = useRef<HTMLDivElement | null>(null);
+  const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
   const emojiPanelRef = useRef<HTMLDivElement | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement | null>(null);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
@@ -123,6 +127,7 @@ export default function HomePage() {
   const onlineCount = members.filter(isOnline).length;
   const visibleMessages = dedupeMessages(messages).filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
   const firstUnreadMessage = member ? findFirstUnreadMessage(visibleMessages, member.id, lastReadAt) : null;
+  const shouldShowUnreadDivider = Boolean(unreadDividerMessageId && (firstUnreadMessage || Date.now() < unreadDividerHoldUntil));
   fetchMessagesRef.current = fetchMessages;
 
   const clearAppBadgeCount = useCallback(() => {
@@ -164,6 +169,54 @@ export default function HomePage() {
       body: JSON.stringify({ member_id: member.id, mark_read: true })
     }).catch(() => undefined);
   }, [member, clearUnreadIndicators]);
+
+  const scrollToAnchor = useCallback((anchorRef: { current: HTMLElement | null }, afterScroll?: () => void) => {
+    let didRetry = false;
+
+    const run = () => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const anchor = anchorRef.current;
+          const panel = listRef.current;
+
+          if (anchor && panel) {
+            const panelRect = panel.getBoundingClientRect();
+            const anchorRect = anchor.getBoundingClientRect();
+            panel.scrollTo({
+              top: Math.max(panel.scrollTop + anchorRect.top - panelRect.top - 8, 0),
+              behavior: "smooth"
+            });
+            afterScroll?.();
+            return;
+          }
+
+          if (!didRetry) {
+            didRetry = true;
+            window.setTimeout(run, 150);
+            return;
+          }
+
+          afterScroll?.();
+        });
+      });
+    };
+
+    run();
+  }, []);
+
+  const scrollToLatestMessage = useCallback(
+    (afterScroll?: () => void) => {
+      scrollToAnchor(bottomAnchorRef, afterScroll);
+    },
+    [scrollToAnchor]
+  );
+
+  const scrollToMessage = useCallback(
+    (messageId: string, afterScroll?: () => void) => {
+      scrollToAnchor({ current: listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`) ?? null }, afterScroll);
+    },
+    [scrollToAnchor]
+  );
 
   useEffect(() => {
     const savedSoundPermission = localStorage.getItem(NOTIFICATION_SOUND_KEY) === "1";
@@ -213,6 +266,25 @@ export default function HomePage() {
     const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(intervalId);
   }, [messages]);
+
+  useEffect(() => {
+    if (firstUnreadMessage) {
+      setUnreadDividerMessageId(firstUnreadMessage.id);
+      setUnreadDividerHoldUntil(Date.now() + 5000);
+      return;
+    }
+
+    if (!unreadDividerMessageId) return;
+
+    const remainingMs = unreadDividerHoldUntil - Date.now();
+    if (remainingMs <= 0) {
+      setUnreadDividerMessageId(null);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setUnreadDividerMessageId(null), remainingMs);
+    return () => window.clearTimeout(timeoutId);
+  }, [firstUnreadMessage, unreadDividerMessageId, unreadDividerHoldUntil]);
 
   useEffect(() => {
     async function restoreSession() {
@@ -452,7 +524,7 @@ export default function HomePage() {
     if (entryScrollPendingRef.current) return;
     scrollOnNextMessagesRef.current = false;
     scrollToLatestMessage();
-  }, [visibleMessages.length]);
+  }, [visibleMessages.length, scrollToLatestMessage]);
 
   useEffect(() => {
     if (!authenticated || !member || !entryScrollSettled) return;
@@ -478,12 +550,12 @@ export default function HomePage() {
 
     if (firstUnreadMessage) {
       entryUnreadPendingRef.current = true;
-      scrollToMessage(firstUnreadMessage.id, () => setEntryScrollSettled(true));
+      scrollToAnchor(unreadAnchorRef, () => setEntryScrollSettled(true));
     } else {
       entryUnreadPendingRef.current = false;
-      scrollToLatestMessage(() => setEntryScrollSettled(true));
+      scrollToAnchor(bottomAnchorRef, () => setEntryScrollSettled(true));
     }
-  }, [authenticated, member, membersLoaded, entryScrollSettled, firstUnreadMessage, visibleMessages]);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, firstUnreadMessage, visibleMessages, scrollToAnchor]);
 
   function readStoredMember() {
     const id = localStorage.getItem(MEMBER_ID_KEY);
@@ -993,36 +1065,6 @@ export default function HomePage() {
     scrollToLatestMessage();
   }
 
-  function scrollToLatestMessage(afterScroll?: () => void) {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        listRef.current?.scrollTo({
-          top: listRef.current.scrollHeight,
-          behavior: "smooth"
-        });
-        afterScroll?.();
-      });
-    });
-  }
-
-  function scrollToMessage(messageId: string, afterScroll?: () => void) {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const messageElement = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
-        const panel = listRef.current;
-        if (messageElement && panel) {
-          const panelRect = panel.getBoundingClientRect();
-          const messageRect = messageElement.getBoundingClientRect();
-          panel.scrollTo({
-            top: Math.max(panel.scrollTop + messageRect.top - panelRect.top - 8, 0),
-            behavior: "smooth"
-          });
-        }
-        afterScroll?.();
-      });
-    });
-  }
-
   function isMessagesPanelNearBottom() {
     const panel = listRef.current;
     if (!panel) return true;
@@ -1293,8 +1335,10 @@ export default function HomePage() {
                   {shouldShowDateSeparator(visibleMessages, index) && (
                     <div className="date-separator">{formatDateSeparator(message.created_at)}</div>
                   )}
-                  {firstUnreadMessage?.id === message.id && (
-                    <div className="unread-separator">Непрочитанные сообщения</div>
+                  {unreadDividerMessageId === message.id && shouldShowUnreadDivider && (
+                    <div className="unread-anchor" ref={unreadAnchorRef}>
+                      <div className="unread-separator">Непрочитанные сообщения</div>
+                    </div>
                   )}
                   {message.type === "system" ? (
                   <div className="system-message">
@@ -1334,6 +1378,7 @@ export default function HomePage() {
                 ))}
               </div>
             )}
+            <div className="bottom-anchor" ref={bottomAnchorRef} aria-hidden="true" />
           </div>
 
           <div>
