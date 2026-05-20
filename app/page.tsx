@@ -91,7 +91,7 @@ export default function HomePage() {
   const [now, setNow] = useState(() => Date.now());
   const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [installHelpOpen, setInstallHelpOpen] = useState(false);
-  const [loadingSession, setLoadingSession] = useState(false);
+  const [loadingSession, setLoadingSession] = useState(true);
   const [connectionError, setConnectionError] = useState("");
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
@@ -113,13 +113,14 @@ export default function HomePage() {
   const notificationSoundEnabledRef = useRef(false);
   const scrollOnNextMessagesRef = useRef(false);
   const entryScrollPendingRef = useRef(false);
+  const entryReadSyncedRef = useRef(false);
   const pushNoticeTimeoutRef = useRef<number | null>(null);
 
   const supabase = useMemo(() => createSupabaseBrowser(), []);
   const memberId = member?.id;
   const chatId = chat?.id;
   const onlineCount = members.filter(isOnline).length;
-  const visibleMessages = messages.filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
+  const visibleMessages = dedupeMessages(messages).filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
   fetchMessagesRef.current = fetchMessages;
 
   useEffect(() => {
@@ -197,10 +198,10 @@ export default function HomePage() {
               setLoginError(data.error || "Не удалось подключиться к чату. Попробуйте обновить страницу.");
               return;
             }
+            const verifiedMember = await verifyStoredMember(storedMember);
             setAuthenticated(true);
             setChat(data.chat);
-            setMember(storedMember);
-            verifyStoredMember(storedMember);
+            setMember(verifiedMember);
           } else if (storedMember) {
             setConnectionError("Сессия входа устарела. Введите общий пароль снова.");
             setLoginError("Сессия входа устарела. Введите общий пароль снова.");
@@ -226,12 +227,13 @@ export default function HomePage() {
   useEffect(() => {
     if (!authenticated || !chat) return;
     setMembersLoaded(false);
-    setNewMessageCount(0);
+    clearUnreadIndicators();
     setEntryScrollSettled(false);
     initialMessagesLoadedRef.current = false;
     knownMessageIdsRef.current = new Set();
     notifiedMessageIdsRef.current = new Set();
     entryScrollPendingRef.current = true;
+    entryReadSyncedRef.current = false;
     fetchMessagesRef.current({ initial: true });
     loadMembers();
   }, [authenticated, chat]);
@@ -279,8 +281,11 @@ export default function HomePage() {
 
     const markRead = async () => {
       if (document.hidden) return;
+      if (entryReadSyncedRef.current && !isMessagesPanelNearBottom()) return;
       const readAt = new Date().toISOString();
       setLastReadAt(readAt);
+      entryReadSyncedRef.current = true;
+      clearUnreadIndicators();
       await fetch("/api/members", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -299,7 +304,7 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisible);
       window.removeEventListener("focus", handleVisible);
     };
-  }, [authenticated, member, membersLoaded, entryScrollSettled, messages.length]);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, visibleMessages.length]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
@@ -342,14 +347,14 @@ export default function HomePage() {
     if (!authenticated || !chat || !supabase) return;
 
     const channel = supabase
-      .channel(`family-chat-${chat.id}`)
+      .channel(`family-chat-${chatId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "messages",
-          filter: `chat_id=eq.${chat.id}`
+          filter: `chat_id=eq.${chatId}`
         },
         () => {
           fetchMessagesRef.current();
@@ -361,7 +366,7 @@ export default function HomePage() {
           event: "UPDATE",
           schema: "public",
           table: "messages",
-          filter: `chat_id=eq.${chat.id}`
+          filter: `chat_id=eq.${chatId}`
         },
         () => {
           fetchMessagesRef.current();
@@ -372,7 +377,7 @@ export default function HomePage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [authenticated, chat, supabase]);
+  }, [authenticated, chat, chatId, supabase]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
@@ -393,7 +398,7 @@ export default function HomePage() {
       window.removeEventListener("online", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [authenticated, member]);
+  }, [authenticated, member, memberId]);
 
   useEffect(() => {
     document.title = newMessageCount > 0 ? `(${newMessageCount}) Семейный чат` : "Семейный чат";
@@ -421,6 +426,22 @@ export default function HomePage() {
   }, [visibleMessages.length]);
 
   useEffect(() => {
+    if (!authenticated || !member || !entryScrollSettled) return;
+    const panel = listRef.current;
+    if (!panel) return;
+
+    const handleScroll = () => {
+      if (document.visibilityState === "visible" && isMessagesPanelNearBottom()) {
+        clearUnreadIndicators();
+      }
+    };
+
+    panel.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+    return () => panel.removeEventListener("scroll", handleScroll);
+  }, [authenticated, member, entryScrollSettled, visibleMessages.length]);
+
+  useEffect(() => {
     if (!authenticated || !member || !membersLoaded || entryScrollSettled || !entryScrollPendingRef.current) return;
     if (!initialMessagesLoadedRef.current) return;
 
@@ -430,12 +451,10 @@ export default function HomePage() {
       : null;
 
     if (firstUnreadMessage) {
-      scrollToMessage(firstUnreadMessage.id);
+      scrollToMessage(firstUnreadMessage.id, () => setEntryScrollSettled(true));
     } else {
-      scrollToLatestMessage();
+      scrollToLatestMessage(() => setEntryScrollSettled(true));
     }
-
-    setEntryScrollSettled(true);
   }, [authenticated, member, membersLoaded, entryScrollSettled, lastReadAt, visibleMessages]);
 
   function readStoredMember() {
@@ -459,28 +478,30 @@ export default function HomePage() {
     localStorage.removeItem(MEMBER_NAME_KEY);
   }
 
-  async function verifyStoredMember(storedMember: Member) {
+  async function verifyStoredMember(storedMember: Member): Promise<Member | null> {
     const response = await fetch(`/api/members?member_id=${encodeURIComponent(storedMember.id)}`).catch(() => null);
     if (!response) {
       setConnectionError("Ошибка подключения. Сохраненный участник не удален.");
-      return;
+      return storedMember;
     }
     if (response.status === 404 || response.status === 403) {
       clearStoredMember();
       setMember(null);
       setConnectionError("");
-      return;
+      return null;
     }
     if (!response.ok) {
       setConnectionError("Не удалось проверить участника. Сохраненная сессия не удалена.");
-      return;
+      return storedMember;
     }
     const data = await response.json().catch(() => ({}));
     if (data.member?.id && data.member?.name) {
-      saveStoredMember({ id: data.member.id, name: data.member.name });
-      setMember({ id: data.member.id, name: data.member.name });
+      const verifiedMember = { id: data.member.id, name: data.member.name };
+      saveStoredMember(verifiedMember);
       setConnectionError("");
+      return verifiedMember;
     }
+    return storedMember;
   }
 
   async function handleLogin(event: FormEvent) {
@@ -521,8 +542,7 @@ export default function HomePage() {
     setConnectionError("");
     const storedMember = readStoredMember();
     if (storedMember) {
-      setMember(storedMember);
-      verifyStoredMember(storedMember);
+      setMember(await verifyStoredMember(storedMember));
     }
   }
 
@@ -588,6 +608,7 @@ export default function HomePage() {
       const data = await response.json();
       const nextMessages = dedupeMessages(data.messages || []);
       const isInitialLoad = options.initial || !initialMessagesLoadedRef.current;
+      const wasNearBottom = isMessagesPanelNearBottom();
       const nextKnownIds = new Set(nextMessages.map((message) => message.id));
       const currentMember = memberRef.current;
       const newForeignMessages =
@@ -600,7 +621,7 @@ export default function HomePage() {
             )
           : [];
 
-      setMessages(nextMessages);
+      setMessages(dedupeMessages(nextMessages));
       knownMessageIdsRef.current = nextKnownIds;
 
       if (isInitialLoad) {
@@ -609,11 +630,16 @@ export default function HomePage() {
         return;
       }
 
-      if (options.forceScroll) scrollOnNextMessagesRef.current = true;
+      if (options.forceScroll || (newForeignMessages.length > 0 && wasNearBottom)) scrollOnNextMessagesRef.current = true;
 
       if (newForeignMessages.length === 0) return;
 
       newForeignMessages.forEach((message) => notifiedMessageIdsRef.current.add(message.id));
+      if (document.visibilityState === "visible" && entryScrollSettled && wasNearBottom) {
+        clearUnreadIndicators();
+        return;
+      }
+
       setNewMessageCount((count) => count + newForeignMessages.length);
       playNotificationCue();
       navigator.vibrate?.(120);
@@ -799,7 +825,7 @@ export default function HomePage() {
     setEmojiOpen(false);
     setImageViewerUrl(null);
     setIsUploadingImage(false);
-    setNewMessageCount(0);
+    clearUnreadIndicators();
     setEntryScrollSettled(false);
     fetchingMessagesRef.current = false;
     pendingMessagesFetchRef.current = false;
@@ -809,6 +835,7 @@ export default function HomePage() {
     memberRef.current = null;
     scrollOnNextMessagesRef.current = false;
     entryScrollPendingRef.current = false;
+    entryReadSyncedRef.current = false;
   }
 
   async function handleDeleteMessage() {
@@ -832,7 +859,7 @@ export default function HomePage() {
       return;
     }
 
-    setMessages((current) => current.map((message) => (message.id === data.message.id ? data.message : message)));
+    setMessages((current) => dedupeMessages(current.map((message) => (message.id === data.message.id ? data.message : message))));
   }
 
   async function handleInstallClick() {
@@ -851,6 +878,14 @@ export default function HomePage() {
     notificationSoundEnabledRef.current = true;
     setNotificationSoundEnabled(true);
     playNotificationCue();
+  }
+
+  function clearUnreadIndicators() {
+    setNewMessageCount(0);
+    const badgeNavigator = navigator as Navigator & {
+      clearAppBadge?: () => Promise<void>;
+    };
+    badgeNavigator.clearAppBadge?.().catch(() => undefined);
   }
 
   function showPushNotice(message: string, autoHide = true) {
@@ -932,23 +967,24 @@ export default function HomePage() {
   }
 
   function handleNewMessageClick() {
-    setNewMessageCount(0);
+    clearUnreadIndicators();
     scrollOnNextMessagesRef.current = true;
     scrollToLatestMessage();
   }
 
-  function scrollToLatestMessage() {
+  function scrollToLatestMessage(afterScroll?: () => void) {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         listRef.current?.scrollTo({
           top: listRef.current.scrollHeight,
           behavior: "smooth"
         });
+        afterScroll?.();
       });
     });
   }
 
-  function scrollToMessage(messageId: string) {
+  function scrollToMessage(messageId: string, afterScroll?: () => void) {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const messageElement = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
@@ -956,8 +992,15 @@ export default function HomePage() {
           block: "start",
           behavior: "smooth"
         });
+        afterScroll?.();
       });
     });
+  }
+
+  function isMessagesPanelNearBottom() {
+    const panel = listRef.current;
+    if (!panel) return true;
+    return panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80;
   }
 
   function playNotificationCue() {

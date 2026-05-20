@@ -368,6 +368,7 @@ h1 {
 .chat-title {
   font-size: clamp(24px, 7vw, 32px);
   line-height: 1.05;
+  white-space: nowrap;
 }
 
 .chat-subtitle {
@@ -710,7 +711,7 @@ h1 {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 46px 52px;
   gap: 10px;
-  align-items: end;
+  align-items: center;
   min-width: 0;
 }
 
@@ -802,6 +803,7 @@ h1 {
 
 .message-input::placeholder {
   font-size: 16px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -814,33 +816,33 @@ h1 {
   box-shadow: 0 12px 24px rgba(205, 105, 75, 0.26);
 }
 
-@media (max-width: 360px) {
+@media (max-width: 430px) {
   .screen {
     padding: 22px 18px 16px;
   }
 
   .chat-screen {
-    padding: 20px 14px 14px;
+    padding: 18px 12px 14px;
   }
 
   .chat-header {
-    grid-template-columns: 42px minmax(0, 1fr) 46px;
-    gap: 8px;
+    grid-template-columns: 38px minmax(0, 1fr) 42px;
+    gap: 6px;
   }
 
   .back-button {
-    width: 40px;
-    height: 40px;
-    font-size: 42px;
+    width: 38px;
+    height: 38px;
+    font-size: 40px;
   }
 
   .header-icon {
-    width: 46px;
-    height: 46px;
+    width: 42px;
+    height: 42px;
   }
 
   .chat-title {
-    font-size: clamp(22px, 6.4vw, 24px);
+    font-size: clamp(20px, 5.8vw, 24px);
   }
 
   .members-panel,
@@ -890,34 +892,38 @@ h1 {
   }
 
   .composer {
-    grid-template-columns: minmax(0, 1fr) 42px 46px;
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) 40px 44px;
+    gap: 7px;
+    align-items: center;
   }
 
   .composer-smile {
-    left: 17px;
-    bottom: 15px;
+    left: 14px;
+    bottom: 50%;
+    transform: translateY(50%);
   }
 
   .image-upload-button {
-    width: 42px;
-    height: 48px;
+    width: 40px;
+    height: 46px;
   }
 
   .send-button {
-    width: 46px;
-    height: 48px;
+    width: 44px;
+    height: 46px;
   }
 
   .message-input {
-    min-height: 52px;
-    border-radius: 24px;
-    font-size: 16px;
-    padding: 15px 12px 15px 48px;
+    min-height: 50px;
+    max-height: 110px;
+    border-radius: 25px;
+    font-size: 15px;
+    line-height: 1.25;
+    padding: 15px 10px 14px 42px;
   }
 
   .message-input::placeholder {
-    font-size: 14px;
+    font-size: 13px;
   }
 }
 
