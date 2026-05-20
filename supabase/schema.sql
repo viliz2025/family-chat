@@ -56,9 +56,26 @@ create index if not exists members_chat_id_idx on public.members(chat_id);
 create index if not exists messages_chat_created_at_idx on public.messages(chat_id, created_at desc);
 create index if not exists messages_created_at_idx on public.messages(created_at);
 
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  chat_id uuid not null references public.chats(id) on delete cascade,
+  member_id uuid not null references public.members(id) on delete cascade,
+  endpoint text not null unique,
+  p256dh text not null,
+  auth text not null,
+  user_agent text null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  disabled_at timestamptz null
+);
+
+create index if not exists push_subscriptions_chat_member_idx on public.push_subscriptions(chat_id, member_id);
+create index if not exists push_subscriptions_enabled_idx on public.push_subscriptions(chat_id, disabled_at);
+
 alter table public.chats enable row level security;
 alter table public.members enable row level security;
 alter table public.messages enable row level security;
+alter table public.push_subscriptions enable row level security;
 
 drop policy if exists "No direct chat reads" on public.chats;
 create policy "No direct chat reads"

@@ -4,6 +4,7 @@ import { chatSlug } from "@/lib/config";
 import { hasValidSession } from "@/lib/session";
 import { createSupabaseAdmin } from "@/lib/supabase-admin";
 import { cleanMessage } from "@/lib/validation";
+import { sendPushToChat } from "@/lib/push";
 
 const PHOTO_BUCKET = "family-chat-photos";
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
@@ -68,7 +69,7 @@ export async function POST(request: Request) {
   if (!chatId) return NextResponse.json({ error: "Чат не настроен" }, { status: 500 });
 
   const supabase = createSupabaseAdmin();
-  const { data: member } = await supabase.from("members").select("id").eq("id", memberId).eq("chat_id", chatId).single();
+  const { data: member } = await supabase.from("members").select("id,name").eq("id", memberId).eq("chat_id", chatId).single();
   if (!member) return NextResponse.json({ error: "Участник не найден" }, { status: 403 });
 
   const { data, error } = await supabase
@@ -87,6 +88,12 @@ export async function POST(request: Request) {
   }
 
   await supabase.from("members").update({ last_seen_at: new Date().toISOString() }).eq("id", memberId);
+  await sendPushToChat({
+    chatId,
+    senderMemberId: memberId,
+    senderName: member.name,
+    messageId: data.id
+  }).catch(() => undefined);
   return NextResponse.json({ message: data });
 }
 
@@ -125,7 +132,7 @@ async function createImageMessageFromPath(body: any) {
   if (!imagePath.startsWith(`${chatId}/${memberId}/`)) return NextResponse.json({ error: "Фото не найдено" }, { status: 403 });
 
   const supabase = createSupabaseAdmin();
-  const { data: member } = await supabase.from("members").select("id").eq("id", memberId).eq("chat_id", chatId).single();
+  const { data: member } = await supabase.from("members").select("id,name").eq("id", memberId).eq("chat_id", chatId).single();
   if (!member) return NextResponse.json({ error: "Участник не найден" }, { status: 403 });
 
   const { data, error } = await supabase
@@ -142,6 +149,12 @@ async function createImageMessageFromPath(body: any) {
   if (error || !data) return NextResponse.json({ error: "Не удалось отправить фото" }, { status: 500 });
 
   await supabase.from("members").update({ last_seen_at: new Date().toISOString() }).eq("id", memberId);
+  await sendPushToChat({
+    chatId,
+    senderMemberId: memberId,
+    senderName: member.name,
+    messageId: data.id
+  }).catch(() => undefined);
   const [message] = await withImageUrls(supabase, [data]);
   return NextResponse.json({ message });
 }
@@ -160,7 +173,7 @@ async function createImageMessage(request: Request) {
   if (!chatId) return NextResponse.json({ error: "Р§Р°С‚ РЅРµ РЅР°СЃС‚СЂРѕРµРЅ" }, { status: 500 });
 
   const supabase = createSupabaseAdmin();
-  const { data: member } = await supabase.from("members").select("id").eq("id", memberId).eq("chat_id", chatId).single();
+  const { data: member } = await supabase.from("members").select("id,name").eq("id", memberId).eq("chat_id", chatId).single();
   if (!member) return NextResponse.json({ error: "РЈС‡Р°СЃС‚РЅРёРє РЅРµ РЅР°Р№РґРµРЅ" }, { status: 403 });
 
   const path = `${chatId}/${memberId}/${Date.now()}-${randomUUID()}.${IMAGE_TYPES[file.type]}`;
@@ -190,6 +203,12 @@ async function createImageMessage(request: Request) {
   }
 
   await supabase.from("members").update({ last_seen_at: new Date().toISOString() }).eq("id", memberId);
+  await sendPushToChat({
+    chatId,
+    senderMemberId: memberId,
+    senderName: member.name,
+    messageId: data.id
+  }).catch(() => undefined);
   const [updatedMessage] = await withImageUrls(supabase, [data]);
   return NextResponse.json({ message: updatedMessage });
 }
