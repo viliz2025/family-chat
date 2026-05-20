@@ -82,7 +82,7 @@ export default function HomePage() {
   const [membersOpen, setMembersOpen] = useState(false);
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [messageToDelete, setMessageToDelete] = useState<Message | null>(null);
-  const [, setLastReadAt] = useState<string | null>(null);
+  const [lastReadAt, setLastReadAt] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -95,6 +95,7 @@ export default function HomePage() {
   const [connectionError, setConnectionError] = useState("");
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(false);
+  const [entryScrollSettled, setEntryScrollSettled] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const emojiPanelRef = useRef<HTMLDivElement | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -108,6 +109,7 @@ export default function HomePage() {
   const fetchMessagesRef = useRef<(options?: { initial?: boolean; forceScroll?: boolean }) => void>(() => undefined);
   const notificationSoundEnabledRef = useRef(false);
   const scrollOnNextMessagesRef = useRef(false);
+  const entryScrollPendingRef = useRef(false);
 
   const supabase = useMemo(() => createSupabaseBrowser(), []);
   const onlineCount = members.filter(isOnline).length;
@@ -207,9 +209,11 @@ export default function HomePage() {
     if (!authenticated || !chat) return;
     setMembersLoaded(false);
     setNewMessageCount(0);
+    setEntryScrollSettled(false);
     initialMessagesLoadedRef.current = false;
     knownMessageIdsRef.current = new Set();
     notifiedMessageIdsRef.current = new Set();
+    entryScrollPendingRef.current = true;
     fetchMessagesRef.current({ initial: true });
     loadMembers();
   }, [authenticated, chat]);
@@ -222,7 +226,7 @@ export default function HomePage() {
   }, [member, members]);
 
   useEffect(() => {
-    if (!authenticated || !member) return;
+    if (!authenticated || !member || !membersLoaded || !entryScrollSettled) return;
 
     const markRead = async () => {
       if (document.hidden) return;
@@ -246,7 +250,7 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisible);
       window.removeEventListener("focus", handleVisible);
     };
-  }, [authenticated, member, messages.length]);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, messages.length]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
@@ -365,6 +369,24 @@ export default function HomePage() {
     scrollOnNextMessagesRef.current = false;
     scrollToLatestMessage();
   }, [visibleMessages.length]);
+
+  useEffect(() => {
+    if (!authenticated || !member || !membersLoaded || entryScrollSettled || !entryScrollPendingRef.current) return;
+    if (!initialMessagesLoadedRef.current) return;
+
+    entryScrollPendingRef.current = false;
+    const firstUnreadMessage = lastReadAt
+      ? visibleMessages.find((message) => isEntryUnread(message, member.id, lastReadAt))
+      : null;
+
+    if (firstUnreadMessage) {
+      scrollToMessage(firstUnreadMessage.id);
+    } else {
+      scrollToLatestMessage();
+    }
+
+    setEntryScrollSettled(true);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, lastReadAt, visibleMessages]);
 
   function readStoredMember() {
     const id = localStorage.getItem(MEMBER_ID_KEY);
@@ -534,7 +556,6 @@ export default function HomePage() {
       if (isInitialLoad) {
         initialMessagesLoadedRef.current = true;
         nextMessages.forEach((message) => notifiedMessageIdsRef.current.add(message.id));
-        scrollOnNextMessagesRef.current = true;
         return;
       }
 
@@ -729,6 +750,7 @@ export default function HomePage() {
     setImageViewerUrl(null);
     setIsUploadingImage(false);
     setNewMessageCount(0);
+    setEntryScrollSettled(false);
     fetchingMessagesRef.current = false;
     pendingMessagesFetchRef.current = false;
     initialMessagesLoadedRef.current = false;
@@ -736,6 +758,7 @@ export default function HomePage() {
     notifiedMessageIdsRef.current = new Set();
     memberRef.current = null;
     scrollOnNextMessagesRef.current = false;
+    entryScrollPendingRef.current = false;
   }
 
   async function handleDeleteMessage() {
@@ -790,6 +813,16 @@ export default function HomePage() {
     requestAnimationFrame(() => {
       listRef.current?.scrollTo({
         top: listRef.current.scrollHeight,
+        behavior: "smooth"
+      });
+    });
+  }
+
+  function scrollToMessage(messageId: string) {
+    requestAnimationFrame(() => {
+      const messageElement = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+      messageElement?.scrollIntoView({
+        block: "start",
         behavior: "smooth"
       });
     });
@@ -955,7 +988,7 @@ export default function HomePage() {
             ) : (
               <div className="message-list">
                 {visibleMessages.map((message, index) => (
-                  <div className="message-item" key={message.id}>
+                  <div className="message-item" data-message-id={message.id} key={message.id}>
                   {shouldShowDateSeparator(visibleMessages, index) && (
                     <div className="date-separator">{formatDateSeparator(message.created_at)}</div>
                   )}
@@ -1226,6 +1259,10 @@ function isNotifiableMessage(message: Message, memberId: string) {
     !message.deleted_at &&
     message.member_id !== memberId
   );
+}
+
+function isEntryUnread(message: Message, memberId: string, lastReadAt: string) {
+  return isNotifiableMessage(message, memberId) && new Date(message.created_at).getTime() > new Date(lastReadAt).getTime();
 }
 
 function dedupeMessages(messages: Message[]) {
