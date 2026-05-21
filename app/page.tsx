@@ -271,22 +271,16 @@ export default function HomePage() {
     let resizeObserver: ResizeObserver | null = null;
     let resizeScheduled = false;
     let run: () => void = () => undefined;
-    let finishTimer: number | null = null;
+    const maxAttempts = 3;
 
     const cleanup = () => {
       completed = true;
-      if (finishTimer) window.clearTimeout(finishTimer);
       resizeObserver?.disconnect();
     };
 
     const finish = (success: boolean) => {
       cleanup();
       afterScroll?.(success);
-    };
-
-    const settle = (success: boolean) => {
-      if (finishTimer) window.clearTimeout(finishTimer);
-      finishTimer = window.setTimeout(() => finish(success), 180);
     };
 
     const scheduleRun = (delay = 0) => {
@@ -297,12 +291,8 @@ export default function HomePage() {
     const observeHeightChanges = (panel: HTMLElement) => {
       if (resizeObserver || typeof ResizeObserver === "undefined") return;
       resizeObserver = new ResizeObserver(() => {
-        if (completed || resizeScheduled || attempts >= 3) return;
+        if (completed || resizeScheduled || attempts >= maxAttempts) return;
         resizeScheduled = true;
-        if (finishTimer) {
-          window.clearTimeout(finishTimer);
-          finishTimer = null;
-        }
         window.setTimeout(() => {
           resizeScheduled = false;
           attempts += 1;
@@ -328,11 +318,26 @@ export default function HomePage() {
           }
 
           observeHeightChanges(panel);
-          panel.scrollTop = panel.scrollHeight;
+          const before = panel.scrollTop;
+          panel.scrollTop = Math.max(panel.scrollHeight - panel.clientHeight, 0);
 
           const distanceFromBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
-          if (distanceFromBottom <= 2 || attempts >= 2) {
-            settle(true);
+          const isAtBottom = distanceFromBottom <= 2;
+          if (process.env.NODE_ENV !== "production") {
+            console.debug("[entry-scroll] bottom", {
+              viewportWidth: window.innerWidth,
+              attempt: attempts + 1,
+              before,
+              after: panel.scrollTop,
+              scrollHeight: panel.scrollHeight,
+              clientHeight: panel.clientHeight,
+              distanceFromBottom,
+              isAtBottom
+            });
+          }
+
+          if (isAtBottom || attempts >= maxAttempts - 1) {
+            finish(isAtBottom);
             return;
           }
 
@@ -1471,7 +1476,7 @@ export default function HomePage() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell chat-app-shell">
       <div className="phone-frame chat-frame">
         <section className="chat-screen">
           <div className="chat-decor" aria-hidden="true">

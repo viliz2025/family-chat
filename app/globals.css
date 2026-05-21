@@ -1062,10 +1062,19 @@ h1 {
     padding: 28px;
   }
 
+  .chat-app-shell {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
   .phone-frame,
   .screen,
   .loading {
     min-height: min(840px, calc(100dvh - 56px));
+  }
+
+  .chat-frame {
+    height: min(840px, calc(100dvh - 56px));
   }
 
   .chat-screen {
