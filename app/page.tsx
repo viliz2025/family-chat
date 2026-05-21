@@ -116,6 +116,7 @@ export default function HomePage() {
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fetchingMessagesRef = useRef(false);
   const pendingMessagesFetchRef = useRef(false);
+  const markReadInFlightRef = useRef(false);
   const initialMessagesLoadedRef = useRef(false);
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
@@ -132,8 +133,11 @@ export default function HomePage() {
   const memberId = member?.id;
   const chatId = chat?.id;
   const onlineCount = members.filter(isOnline).length;
+  const currentChatMember = member ? members.find((chatMember) => chatMember.id === member.id) ?? null : null;
+  const hasCurrentMemberReadState = Boolean(currentChatMember?.last_read_at || entryReadSyncedRef.current);
   const visibleMessages = dedupeMessages(messages).filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
-  const firstUnreadMessage = member ? findFirstUnreadMessage(visibleMessages, member.id, lastReadAt) : null;
+  const firstUnreadMessage =
+    member && membersLoaded && hasCurrentMemberReadState ? findFirstUnreadMessage(visibleMessages, member.id, lastReadAt) : null;
   const lastVisibleMessage = getLastVisibleMessage(visibleMessages);
   const entryScrollTarget = useMemo<EntryScrollTarget>(() => {
     if (firstUnreadMessage) return { type: "unread", messageId: firstUnreadMessage.id };
@@ -172,18 +176,38 @@ export default function HomePage() {
 
   const markChatRead = useCallback(async () => {
     if (!member || document.hidden) return;
+    if (markReadInFlightRef.current) return;
 
     const readAt = new Date().toISOString();
-    setLastReadAt(readAt);
-    entryReadSyncedRef.current = true;
-    entryUnreadPendingRef.current = false;
-    clearUnreadIndicators();
+    markReadInFlightRef.current = true;
+    if (process.env.NODE_ENV !== "production") {
+      console.debug("[unread] mark_read", { memberId: member.id, readAt });
+    }
 
-    await fetch("/api/members", {
+    const response = await fetch("/api/members", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ member_id: member.id, mark_read: true })
     }).catch(() => undefined);
+
+    markReadInFlightRef.current = false;
+    if (!response?.ok) return;
+
+    setLastReadAt((current) => getLatestTimestamp(current, readAt));
+    setMembers((current) =>
+      current.map((chatMember) =>
+        chatMember.id === member.id
+          ? {
+              ...chatMember,
+              last_seen_at: getLatestTimestamp(chatMember.last_seen_at, readAt) ?? readAt,
+              last_read_at: getLatestTimestamp(chatMember.last_read_at, readAt) ?? readAt
+            }
+          : chatMember
+      )
+    );
+    entryReadSyncedRef.current = true;
+    entryUnreadPendingRef.current = false;
+    clearUnreadIndicators();
   }, [member, clearUnreadIndicators]);
 
   const scrollToElement = useCallback(
@@ -379,6 +403,9 @@ export default function HomePage() {
     if (!authenticated || !chat) return;
     setMembersLoaded(false);
     clearUnreadIndicators();
+    setLastReadAt(null);
+    setUnreadDividerMessageId(null);
+    setUnreadDividerHoldUntil(0);
     setEntryScrollSettled(false);
     initialMessagesLoadedRef.current = false;
     knownMessageIdsRef.current = new Set();
@@ -423,10 +450,17 @@ export default function HomePage() {
 
   useEffect(() => {
     memberRef.current = member;
-    if (!member) return;
-    const currentMember = members.find((chatMember) => chatMember.id === member.id);
-    setLastReadAt((current) => getLatestTimestamp(current, currentMember?.last_read_at ?? null));
-  }, [member, members]);
+    if (!member) {
+      setLastReadAt(null);
+      return;
+    }
+    if (!membersLoaded) return;
+    if (!currentChatMember) {
+      setLastReadAt(null);
+      return;
+    }
+    setLastReadAt((current) => getLatestTimestamp(current, currentChatMember?.last_read_at ?? null));
+  }, [member, membersLoaded, currentChatMember]);
 
   useEffect(() => {
     if (!authenticated || !member || !membersLoaded || !entryScrollSettled) return;
@@ -548,6 +582,21 @@ export default function HomePage() {
   }, [newMessageCount]);
 
   useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    if (!authenticated || !member) return;
+    console.debug("[unread] state", {
+      memberId: member.id,
+      memberName: member.name,
+      currentMemberLastReadAt: currentChatMember?.last_read_at ?? null,
+      usedLastReadAt: lastReadAt,
+      hasCurrentMemberReadState,
+      firstUnreadId: firstUnreadMessage?.id ?? null,
+      firstUnreadCreatedAt: firstUnreadMessage?.created_at ?? null,
+      entryScrollTarget
+    });
+  }, [authenticated, member, currentChatMember?.last_read_at, lastReadAt, hasCurrentMemberReadState, firstUnreadMessage, entryScrollTarget]);
+
+  useEffect(() => {
     if (!scrollOnNextMessagesRef.current) return;
     if (entryScrollPendingRef.current) return;
     scrollOnNextMessagesRef.current = false;
@@ -572,6 +621,7 @@ export default function HomePage() {
 
   useLayoutEffect(() => {
     if (!authenticated || !member || !membersLoaded || entryScrollSettled || !entryScrollPendingRef.current) return;
+    if (!currentChatMember) return;
     if (!initialMessagesLoadedRef.current) return;
 
     entryScrollPendingRef.current = false;
@@ -597,7 +647,7 @@ export default function HomePage() {
     }
 
     scrollToAnchor(bottomAnchorRef, finishEntryScroll, { align: "end", behavior: "auto" });
-  }, [authenticated, member, membersLoaded, entryScrollSettled, entryScrollTarget, scrollToAnchor, scrollToMessage]);
+  }, [authenticated, member, membersLoaded, currentChatMember, entryScrollSettled, entryScrollTarget, scrollToAnchor, scrollToMessage]);
 
   function readStoredMember() {
     const id = localStorage.getItem(MEMBER_ID_KEY);
