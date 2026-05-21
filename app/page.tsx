@@ -513,10 +513,6 @@ export default function HomePage() {
   }, [newMessageCount]);
 
   useEffect(() => {
-    if (newMessageCount === 0) clearAppBadgeCount();
-  }, [newMessageCount, clearAppBadgeCount]);
-
-  useEffect(() => {
     if (!scrollOnNextMessagesRef.current) return;
     if (entryScrollPendingRef.current) return;
     scrollOnNextMessagesRef.current = false;
