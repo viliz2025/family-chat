@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Bell, Eye, Heart, ImagePlus, Lock, Pin, Plus, Send, Share2, Smile } from "lucide-react";
 import { createSupabaseBrowser } from "@/lib/supabase-browser";
 import { MAX_MESSAGE_LENGTH } from "@/lib/validation";
@@ -39,6 +39,13 @@ type Message = {
     name: string;
   } | null;
 };
+
+type EntryScrollTarget =
+  | { type: "unread"; messageId: string }
+  | { type: "last-message"; messageId: string }
+  | { type: "bottom" };
+
+type ScrollAlign = "start" | "end";
 
 const MEMBER_ID_KEY = "family_chat_member_id";
 const MEMBER_NAME_KEY = "family_chat_member_name";
@@ -127,7 +134,14 @@ export default function HomePage() {
   const onlineCount = members.filter(isOnline).length;
   const visibleMessages = dedupeMessages(messages).filter((message) => message.type !== "system" || now - new Date(message.created_at).getTime() < SYSTEM_MESSAGE_VISIBLE_MS);
   const firstUnreadMessage = member ? findFirstUnreadMessage(visibleMessages, member.id, lastReadAt) : null;
-  const shouldShowUnreadDivider = Boolean(unreadDividerMessageId && (firstUnreadMessage || Date.now() < unreadDividerHoldUntil));
+  const lastVisibleMessage = getLastVisibleMessage(visibleMessages);
+  const entryScrollTarget = useMemo<EntryScrollTarget>(() => {
+    if (firstUnreadMessage) return { type: "unread", messageId: firstUnreadMessage.id };
+    if (lastVisibleMessage) return { type: "last-message", messageId: lastVisibleMessage.id };
+    return { type: "bottom" };
+  }, [firstUnreadMessage, lastVisibleMessage]);
+  const activeUnreadDividerMessageId = unreadDividerMessageId ?? firstUnreadMessage?.id ?? null;
+  const shouldShowUnreadDivider = Boolean(activeUnreadDividerMessageId && (firstUnreadMessage || Date.now() < unreadDividerHoldUntil));
   fetchMessagesRef.current = fetchMessages;
 
   const clearAppBadgeCount = useCallback(() => {
@@ -172,52 +186,73 @@ export default function HomePage() {
     }).catch(() => undefined);
   }, [member, clearUnreadIndicators]);
 
-  const scrollToAnchor = useCallback((anchorRef: { current: HTMLElement | null }, afterScroll?: () => void) => {
-    let didRetry = false;
+  const scrollToElement = useCallback(
+    (
+      getElement: () => HTMLElement | null,
+      afterScroll?: (success: boolean) => void,
+      options: { align?: ScrollAlign; behavior?: ScrollBehavior } = {}
+    ) => {
+      const align = options.align ?? "start";
+      const behavior = options.behavior ?? "smooth";
+      let didRetry = false;
 
-    const run = () => {
-      requestAnimationFrame(() => {
+      const run = () => {
         requestAnimationFrame(() => {
-          const anchor = anchorRef.current;
-          const panel = listRef.current;
+          requestAnimationFrame(() => {
+            const target = getElement();
+            const panel = listRef.current;
 
-          if (anchor && panel) {
-            const panelRect = panel.getBoundingClientRect();
-            const anchorRect = anchor.getBoundingClientRect();
-            panel.scrollTo({
-              top: Math.max(panel.scrollTop + anchorRect.top - panelRect.top - 8, 0),
-              behavior: "smooth"
-            });
-            afterScroll?.();
-            return;
-          }
+            if (target && panel) {
+              const panelRect = panel.getBoundingClientRect();
+              const targetRect = target.getBoundingClientRect();
+              const targetTop =
+                align === "end"
+                  ? panel.scrollTop + targetRect.bottom - panelRect.bottom + 8
+                  : panel.scrollTop + targetRect.top - panelRect.top - 8;
 
-          if (!didRetry) {
-            didRetry = true;
-            window.setTimeout(run, 150);
-            return;
-          }
+              panel.scrollTo({
+                top: Math.max(targetTop, 0),
+                behavior
+              });
+              afterScroll?.(true);
+              return;
+            }
 
-          afterScroll?.();
+            if (!didRetry) {
+              didRetry = true;
+              window.setTimeout(run, 150);
+              return;
+            }
+
+            afterScroll?.(false);
+          });
         });
-      });
-    };
+      };
 
-    run();
-  }, []);
+      run();
+    },
+    []
+  );
+
+  const scrollToAnchor = useCallback(
+    (anchorRef: { current: HTMLElement | null }, afterScroll?: (success: boolean) => void, options?: { align?: ScrollAlign; behavior?: ScrollBehavior }) => {
+      scrollToElement(() => anchorRef.current, afterScroll, options);
+    },
+    [scrollToElement]
+  );
 
   const scrollToLatestMessage = useCallback(
     (afterScroll?: () => void) => {
-      scrollToAnchor(bottomAnchorRef, afterScroll);
+      scrollToAnchor(bottomAnchorRef, () => afterScroll?.());
     },
     [scrollToAnchor]
   );
 
   const scrollToMessage = useCallback(
-    (messageId: string, afterScroll?: () => void) => {
-      scrollToAnchor({ current: listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`) ?? null }, afterScroll);
+    (messageId: string, afterScroll?: (success: boolean) => void, options?: { align?: ScrollAlign; behavior?: ScrollBehavior }) => {
+      scrollToElement(() => listRef.current?.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`) ?? null, afterScroll, options);
     },
-    [scrollToAnchor]
+    [scrollToElement]
   );
 
   useEffect(() => {
@@ -535,20 +570,34 @@ export default function HomePage() {
     return () => panel.removeEventListener("scroll", handleScroll);
   }, [authenticated, member, entryScrollSettled, visibleMessages.length, markChatRead]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!authenticated || !member || !membersLoaded || entryScrollSettled || !entryScrollPendingRef.current) return;
     if (!initialMessagesLoadedRef.current) return;
 
     entryScrollPendingRef.current = false;
+    entryUnreadPendingRef.current = entryScrollTarget.type === "unread";
 
-    if (firstUnreadMessage) {
-      entryUnreadPendingRef.current = true;
-      scrollToAnchor(unreadAnchorRef, () => setEntryScrollSettled(true));
-    } else {
-      entryUnreadPendingRef.current = false;
-      scrollToAnchor(bottomAnchorRef, () => setEntryScrollSettled(true));
+    const finishEntryScroll = (success: boolean) => {
+      if (success || entryScrollTarget.type === "bottom") {
+        setEntryScrollSettled(true);
+        return;
+      }
+
+      scrollToAnchor(bottomAnchorRef, () => setEntryScrollSettled(true), { align: "end", behavior: "auto" });
+    };
+
+    if (entryScrollTarget.type === "unread") {
+      scrollToAnchor(unreadAnchorRef, finishEntryScroll, { align: "start", behavior: "auto" });
+      return;
     }
-  }, [authenticated, member, membersLoaded, entryScrollSettled, firstUnreadMessage, visibleMessages, scrollToAnchor]);
+
+    if (entryScrollTarget.type === "last-message") {
+      scrollToMessage(entryScrollTarget.messageId, finishEntryScroll, { align: "end", behavior: "auto" });
+      return;
+    }
+
+    scrollToAnchor(bottomAnchorRef, finishEntryScroll, { align: "end", behavior: "auto" });
+  }, [authenticated, member, membersLoaded, entryScrollSettled, entryScrollTarget, scrollToAnchor, scrollToMessage]);
 
   function readStoredMember() {
     const id = localStorage.getItem(MEMBER_ID_KEY);
@@ -1328,7 +1377,7 @@ export default function HomePage() {
                   {shouldShowDateSeparator(visibleMessages, index) && (
                     <div className="date-separator">{formatDateSeparator(message.created_at)}</div>
                   )}
-                  {unreadDividerMessageId === message.id && shouldShowUnreadDivider && (
+                  {activeUnreadDividerMessageId === message.id && shouldShowUnreadDivider && (
                     <div className="unread-anchor" ref={unreadAnchorRef}>
                       <div className="unread-separator">Непрочитанные сообщения</div>
                     </div>
@@ -1540,6 +1589,10 @@ function isNotifiableMessage(message: Message, memberId: string) {
 
 function findFirstUnreadMessage(messages: Message[], memberId: string, lastReadAt: string | null) {
   return messages.find((message) => isEntryUnread(message, memberId, lastReadAt)) ?? null;
+}
+
+function getLastVisibleMessage(messages: Message[]) {
+  return messages.length > 0 ? messages[messages.length - 1] : null;
 }
 
 function isEntryUnread(message: Message, memberId: string, lastReadAt: string | null) {

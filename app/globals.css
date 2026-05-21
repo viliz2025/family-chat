@@ -548,6 +548,7 @@ h1 {
   z-index: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-anchor: none;
   padding: 2px 8px 42px;
   scroll-behavior: smooth;
   scrollbar-width: none;
