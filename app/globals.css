@@ -550,7 +550,7 @@ h1 {
   overflow-y: auto;
   overflow-anchor: none;
   padding: 2px 8px 42px;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
   scrollbar-width: none;
 }
 

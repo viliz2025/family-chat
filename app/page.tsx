@@ -127,6 +127,7 @@ export default function HomePage() {
   const entryScrollTargetRef = useRef<EntryScrollTarget>({ type: "bottom" });
   const entryScrollGuardActiveRef = useRef(false);
   const entryScrollGuardTimeoutRef = useRef<number | null>(null);
+  const entryScrollFallbackTimeoutRef = useRef<number | null>(null);
   const entryReadSyncedRef = useRef(false);
   const entryUnreadPendingRef = useRef(false);
   const pushNoticeTimeoutRef = useRef<number | null>(null);
@@ -235,10 +236,15 @@ export default function HomePage() {
                   ? panel.scrollTop + targetRect.bottom - panelRect.bottom + 8
                   : panel.scrollTop + targetRect.top - panelRect.top - 8;
 
-              panel.scrollTo({
-                top: Math.max(targetTop, 0),
-                behavior
-              });
+              const nextTop = Math.max(targetTop, 0);
+              if (behavior === "auto") {
+                panel.scrollTop = nextTop;
+              } else {
+                panel.scrollTo({
+                  top: nextTop,
+                  behavior
+                });
+              }
               afterScroll?.(true);
               return;
             }
@@ -358,8 +364,31 @@ export default function HomePage() {
     [scrollToAnchor]
   );
 
+  const scrollUnreadAnchorInstant = useCallback(() => {
+    const panel = listRef.current;
+    const anchor = unreadAnchorRef.current;
+    if (!panel || !anchor) return false;
+
+    const panelRect = panel.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    panel.scrollTop = Math.max(panel.scrollTop + anchorRect.top - panelRect.top - 8, 0);
+    return true;
+  }, []);
+
+  const scrollBottomInstant = useCallback(() => {
+    const panel = listRef.current;
+    if (!panel) return false;
+    panel.scrollTop = Math.max(panel.scrollHeight - panel.clientHeight, 0);
+    return true;
+  }, []);
+
   const completeEntryScroll = useCallback(
     (success: boolean) => {
+      if (entryScrollFallbackTimeoutRef.current) {
+        window.clearTimeout(entryScrollFallbackTimeoutRef.current);
+        entryScrollFallbackTimeoutRef.current = null;
+      }
+
       if (!success && entryScrollTargetRef.current.type === "unread") {
         scrollMessagesToBottom(() => {
           setEntryScrollSettled(true);
@@ -539,6 +568,8 @@ export default function HomePage() {
     entryScrollGuardActiveRef.current = true;
     if (entryScrollGuardTimeoutRef.current) window.clearTimeout(entryScrollGuardTimeoutRef.current);
     entryScrollGuardTimeoutRef.current = null;
+    if (entryScrollFallbackTimeoutRef.current) window.clearTimeout(entryScrollFallbackTimeoutRef.current);
+    entryScrollFallbackTimeoutRef.current = null;
     entryReadSyncedRef.current = false;
     entryUnreadPendingRef.current = false;
     fetchMessagesRef.current({ initial: true });
@@ -754,8 +785,25 @@ export default function HomePage() {
 
     entryScrollTargetRef.current = entryScrollTarget;
     entryScrollPendingRef.current = false;
+    if (entryScrollFallbackTimeoutRef.current) window.clearTimeout(entryScrollFallbackTimeoutRef.current);
+    entryScrollFallbackTimeoutRef.current = window.setTimeout(() => {
+      const target = entryScrollTargetRef.current;
+      const success = target.type === "unread" ? scrollUnreadAnchorInstant() : scrollBottomInstant();
+      completeEntryScroll(success);
+    }, 1500);
     performEntryScroll(true);
-  }, [authenticated, member, membersLoaded, currentChatMember, entryScrollSettled, entryScrollTarget, performEntryScroll]);
+  }, [
+    authenticated,
+    member,
+    membersLoaded,
+    currentChatMember,
+    entryScrollSettled,
+    entryScrollTarget,
+    completeEntryScroll,
+    performEntryScroll,
+    scrollBottomInstant,
+    scrollUnreadAnchorInstant
+  ]);
 
   useEffect(() => {
     if (!authenticated || !member || !membersLoaded || !currentChatMember) return;
@@ -1161,6 +1209,8 @@ export default function HomePage() {
     entryScrollGuardActiveRef.current = false;
     if (entryScrollGuardTimeoutRef.current) window.clearTimeout(entryScrollGuardTimeoutRef.current);
     entryScrollGuardTimeoutRef.current = null;
+    if (entryScrollFallbackTimeoutRef.current) window.clearTimeout(entryScrollFallbackTimeoutRef.current);
+    entryScrollFallbackTimeoutRef.current = null;
     entryReadSyncedRef.current = false;
     entryUnreadPendingRef.current = false;
   }
