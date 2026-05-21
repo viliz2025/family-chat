@@ -146,6 +146,7 @@ export default function HomePage() {
   }, [firstUnreadMessage]);
   const activeUnreadDividerMessageId = unreadDividerMessageId ?? firstUnreadMessage?.id ?? null;
   const shouldShowUnreadDivider = Boolean(activeUnreadDividerMessageId && (firstUnreadMessage || Date.now() < unreadDividerHoldUntil));
+  const shouldHideMessagesForEntryScroll = authenticated && Boolean(member) && visibleMessages.length > 0 && !entryScrollSettled;
   fetchMessagesRef.current = fetchMessages;
 
   const clearAppBadgeCount = useCallback(() => {
@@ -1550,7 +1551,7 @@ export default function HomePage() {
             <Pin className="note-pin" size={24} aria-hidden="true" />
           </div>
 
-          <div className="messages-panel" ref={listRef}>
+          <div className={`messages-panel ${shouldHideMessagesForEntryScroll ? "entry-scroll-hidden" : ""}`} ref={listRef}>
             {visibleMessages.length === 0 ? (
               <p className="empty-state">История хранится 15 дней, чтобы чат оставался лёгким, быстрым и приватным.</p>
             ) : (
