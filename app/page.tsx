@@ -46,6 +46,19 @@ type EntryScrollTarget =
 
 type ScrollAlign = "start" | "end";
 
+type ScrollDebugEvent = {
+  event: string;
+  t: number;
+  at: string;
+  data?: Record<string, unknown>;
+};
+
+declare global {
+  interface Window {
+    __familyChatScrollDebug?: ScrollDebugEvent[];
+  }
+}
+
 const MEMBER_ID_KEY = "family_chat_member_id";
 const MEMBER_NAME_KEY = "family_chat_member_name";
 const NOTIFICATION_SOUND_KEY = "family_chat_notification_sound";
@@ -120,7 +133,7 @@ export default function HomePage() {
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const notifiedMessageIdsRef = useRef<Set<string>>(new Set());
   const memberRef = useRef<Member | null>(null);
-  const fetchMessagesRef = useRef<(options?: { initial?: boolean; forceScroll?: boolean }) => void>(() => undefined);
+  const fetchMessagesRef = useRef<(options?: { initial?: boolean; forceScroll?: boolean; reason?: string }) => void>(() => undefined);
   const notificationSoundEnabledRef = useRef(false);
   const scrollOnNextMessagesRef = useRef(false);
   const entryScrollPendingRef = useRef(false);
@@ -128,9 +141,11 @@ export default function HomePage() {
   const entryScrollGuardActiveRef = useRef(false);
   const entryScrollGuardTimeoutRef = useRef<number | null>(null);
   const entryScrollFallbackTimeoutRef = useRef<number | null>(null);
+  const entryScrollSettledRef = useRef(false);
   const entryReadSyncedRef = useRef(false);
   const entryUnreadPendingRef = useRef(false);
   const pushNoticeTimeoutRef = useRef<number | null>(null);
+  const scrollDebugStartRef = useRef(0);
 
   const supabase = useMemo(() => createSupabaseBrowser(), []);
   const memberId = member?.id;
@@ -149,6 +164,53 @@ export default function HomePage() {
   const shouldShowUnreadDivider = Boolean(activeUnreadDividerMessageId && (firstUnreadMessage || Date.now() < unreadDividerHoldUntil));
   const shouldHideMessagesForEntryScroll = authenticated && Boolean(member) && visibleMessages.length > 0 && !entryScrollSettled;
   fetchMessagesRef.current = fetchMessages;
+
+  useEffect(() => {
+    entryScrollSettledRef.current = entryScrollSettled;
+  }, [entryScrollSettled]);
+
+  const isScrollDebugEnabled = useCallback(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("debugScroll") === "1" || localStorage.getItem("family_chat_debug_scroll") === "1";
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const logScrollDebug = useCallback(
+    (event: string, data: Record<string, unknown> = {}) => {
+      if (!isScrollDebugEnabled()) return;
+      if (!scrollDebugStartRef.current) scrollDebugStartRef.current = performance.now();
+
+      const panel = listRef.current;
+      const distanceFromBottom = panel ? panel.scrollHeight - panel.scrollTop - panel.clientHeight : null;
+      const item: ScrollDebugEvent = {
+        event,
+        t: Math.round(performance.now() - scrollDebugStartRef.current),
+        at: new Date().toISOString(),
+        data: {
+          ...data,
+          entryScrollSettled: entryScrollSettledRef.current,
+          entryScrollPending: entryScrollPendingRef.current,
+          entryScrollTarget: entryScrollTargetRef.current,
+          scrollTop: panel?.scrollTop ?? null,
+          scrollHeight: panel?.scrollHeight ?? null,
+          clientHeight: panel?.clientHeight ?? null,
+          distanceFromBottom,
+          isAtBottom: typeof distanceFromBottom === "number" ? distanceFromBottom <= 2 : null,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          userAgent: navigator.userAgent
+        }
+      };
+
+      const events = window.__familyChatScrollDebug ?? [];
+      events.push(item);
+      window.__familyChatScrollDebug = events.slice(-100);
+      console.debug("[scroll-debug]", item);
+    },
+    [isScrollDebugEnabled]
+  );
 
   const clearAppBadgeCount = useCallback(() => {
     const badgeNavigator = navigator as Navigator & {
@@ -177,11 +239,18 @@ export default function HomePage() {
   }, [clearAppBadgeCount]);
 
   const markChatRead = useCallback(async () => {
-    if (!member || document.hidden) return;
-    if (markReadInFlightRef.current) return;
+    if (!member || document.hidden) {
+      logScrollDebug("mark_read skipped", { reason: !member ? "no member" : "document hidden" });
+      return;
+    }
+    if (markReadInFlightRef.current) {
+      logScrollDebug("mark_read skipped", { reason: "in flight" });
+      return;
+    }
 
     const readAt = new Date().toISOString();
     markReadInFlightRef.current = true;
+    logScrollDebug("mark_read called", { memberId: member.id, readAt });
     if (process.env.NODE_ENV !== "production") {
       console.debug("[unread] mark_read", { memberId: member.id, readAt });
     }
@@ -193,7 +262,10 @@ export default function HomePage() {
     }).catch(() => undefined);
 
     markReadInFlightRef.current = false;
-    if (!response?.ok) return;
+    if (!response?.ok) {
+      logScrollDebug("mark_read failed", { status: response?.status ?? null });
+      return;
+    }
 
     setLastReadAt((current) => getLatestTimestamp(current, readAt));
     setMembers((current) =>
@@ -210,7 +282,7 @@ export default function HomePage() {
     entryReadSyncedRef.current = true;
     entryUnreadPendingRef.current = false;
     clearUnreadIndicators();
-  }, [member, clearUnreadIndicators]);
+  }, [member, clearUnreadIndicators, logScrollDebug]);
 
   const scrollToElement = useCallback(
     (
@@ -237,6 +309,7 @@ export default function HomePage() {
                   : panel.scrollTop + targetRect.top - panelRect.top - 8;
 
               const nextTop = Math.max(targetTop, 0);
+              const before = panel.scrollTop;
               if (behavior === "auto") {
                 panel.scrollTop = nextTop;
               } else {
@@ -245,6 +318,14 @@ export default function HomePage() {
                   behavior
                 });
               }
+              logScrollDebug("scroll attempt", {
+                kind: "anchor",
+                align,
+                behavior,
+                before,
+                after: panel.scrollTop,
+                targetTop: nextTop
+              });
               afterScroll?.(true);
               return;
             }
@@ -262,7 +343,7 @@ export default function HomePage() {
 
       run();
     },
-    []
+    [logScrollDebug]
   );
 
   const scrollToAnchor = useCallback(
@@ -330,18 +411,14 @@ export default function HomePage() {
 
           const distanceFromBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
           const isAtBottom = distanceFromBottom <= 2;
-          if (process.env.NODE_ENV !== "production") {
-            console.debug("[entry-scroll] bottom", {
-              viewportWidth: window.innerWidth,
-              attempt: attempts + 1,
-              before,
-              after: panel.scrollTop,
-              scrollHeight: panel.scrollHeight,
-              clientHeight: panel.clientHeight,
-              distanceFromBottom,
-              isAtBottom
-            });
-          }
+          logScrollDebug("scroll attempt", {
+            kind: "bottom",
+            attempt: attempts + 1,
+            before,
+            after: panel.scrollTop,
+            distanceFromBottom,
+            isAtBottom
+          });
 
           if (isAtBottom || attempts >= maxAttempts - 1) {
             finish(isAtBottom);
@@ -355,7 +432,7 @@ export default function HomePage() {
     };
 
     run();
-  }, []);
+  }, [logScrollDebug]);
 
   const scrollToLatestMessage = useCallback(
     (afterScroll?: () => void) => {
@@ -382,6 +459,43 @@ export default function HomePage() {
     return true;
   }, []);
 
+  const scheduleScrollDriftChecks = useCallback(
+    (target: EntryScrollTarget) => {
+      [100, 300, 700].forEach((delay) => {
+        window.setTimeout(() => {
+          const panel = listRef.current;
+          if (!panel) return;
+
+          if (target.type === "bottom") {
+            const distanceFromBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+            logScrollDebug("post-entry scroll check", {
+              delay,
+              target,
+              distanceFromBottom,
+              ok: distanceFromBottom <= 2
+            });
+            if (distanceFromBottom > 2) logScrollDebug("scroll drift detected", { delay, target, distanceFromBottom });
+            return;
+          }
+
+          const anchor = unreadAnchorRef.current;
+          if (!anchor) return;
+          const panelRect = panel.getBoundingClientRect();
+          const anchorRect = anchor.getBoundingClientRect();
+          const offset = anchorRect.top - panelRect.top;
+          logScrollDebug("post-entry scroll check", {
+            delay,
+            target,
+            offset,
+            ok: Math.abs(offset - 8) <= 16
+          });
+          if (Math.abs(offset - 8) > 16) logScrollDebug("scroll drift detected", { delay, target, offset });
+        }, delay);
+      });
+    },
+    [logScrollDebug]
+  );
+
   const completeEntryScroll = useCallback(
     (success: boolean) => {
       if (entryScrollFallbackTimeoutRef.current) {
@@ -392,6 +506,8 @@ export default function HomePage() {
       if (!success && entryScrollTargetRef.current.type === "unread") {
         scrollMessagesToBottom(() => {
           setEntryScrollSettled(true);
+          logScrollDebug("entry scroll settled", { success: false, fallback: "bottom", target: entryScrollTargetRef.current });
+          scheduleScrollDriftChecks({ type: "bottom" });
           if (entryScrollGuardTimeoutRef.current) window.clearTimeout(entryScrollGuardTimeoutRef.current);
           entryScrollGuardTimeoutRef.current = window.setTimeout(() => {
             entryScrollGuardActiveRef.current = false;
@@ -402,13 +518,15 @@ export default function HomePage() {
       }
 
       setEntryScrollSettled(true);
+      logScrollDebug("entry scroll settled", { success, target: entryScrollTargetRef.current });
+      scheduleScrollDriftChecks(entryScrollTargetRef.current);
       if (entryScrollGuardTimeoutRef.current) window.clearTimeout(entryScrollGuardTimeoutRef.current);
       entryScrollGuardTimeoutRef.current = window.setTimeout(() => {
         entryScrollGuardActiveRef.current = false;
         entryScrollGuardTimeoutRef.current = null;
       }, 2500);
     },
-    [scrollMessagesToBottom]
+    [logScrollDebug, scheduleScrollDriftChecks, scrollMessagesToBottom]
   );
 
   const performEntryScroll = useCallback(
@@ -435,6 +553,7 @@ export default function HomePage() {
 
     if ("scrollRestoration" in history) {
       history.scrollRestoration = "manual";
+      logScrollDebug("scroll restoration manual");
     }
 
     if ("serviceWorker" in navigator) {
@@ -460,7 +579,7 @@ export default function HomePage() {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
       if (pushNoticeTimeoutRef.current) window.clearTimeout(pushNoticeTimeoutRef.current);
     };
-  }, []);
+  }, [logScrollDebug]);
 
   useEffect(() => {
     if (!emojiOpen) return;
@@ -527,6 +646,7 @@ export default function HomePage() {
               return;
             }
             const verifiedMember = await verifyStoredMember(storedMember);
+            logScrollDebug("member restored", { memberId: verifiedMember?.id ?? null, memberName: verifiedMember?.name ?? null });
             setAuthenticated(true);
             setChat(data.chat);
             setMember(verifiedMember);
@@ -545,15 +665,17 @@ export default function HomePage() {
         }
       } finally {
         window.clearTimeout(timeoutId);
+        logScrollDebug("restoreSession done", { storedMember: Boolean(readStoredMember()) });
         setLoadingSession(false);
       }
     }
 
     restoreSession();
-  }, []);
+  }, [logScrollDebug]);
 
   useEffect(() => {
     if (!authenticated || !chat) return;
+    logScrollDebug("entry phase started", { chatId: chat.id });
     setMembersLoaded(false);
     clearUnreadIndicators();
     setLastReadAt(null);
@@ -572,9 +694,9 @@ export default function HomePage() {
     entryScrollFallbackTimeoutRef.current = null;
     entryReadSyncedRef.current = false;
     entryUnreadPendingRef.current = false;
-    fetchMessagesRef.current({ initial: true });
+    fetchMessagesRef.current({ initial: true, reason: "initial" });
     loadMembers();
-  }, [authenticated, chat, clearUnreadIndicators]);
+  }, [authenticated, chat, clearUnreadIndicators, logScrollDebug]);
 
   useEffect(() => {
     if (!authenticated || !memberId || !chatId) {
@@ -618,14 +740,29 @@ export default function HomePage() {
       setLastReadAt(null);
       return;
     }
+    logScrollDebug("current member read state", {
+      memberId: member.id,
+      memberName: member.name,
+      lastReadAt: currentChatMember.last_read_at,
+      firstUnreadId: firstUnreadMessage?.id ?? null,
+      firstUnreadCreatedAt: firstUnreadMessage?.created_at ?? null,
+      entryScrollTarget
+    });
     setLastReadAt((current) => getLatestTimestamp(current, currentChatMember?.last_read_at ?? null));
-  }, [member, membersLoaded, currentChatMember]);
+  }, [member, membersLoaded, currentChatMember, firstUnreadMessage, entryScrollTarget, logScrollDebug]);
 
   useEffect(() => {
     if (!authenticated || !member || !membersLoaded || !entryScrollSettled) return;
 
     const markRead = () => {
-      if (entryUnreadPendingRef.current || !isMessagesPanelNearBottom()) return;
+      if (entryUnreadPendingRef.current) {
+        logScrollDebug("mark_read skipped", { reason: "entry unread pending" });
+        return;
+      }
+      if (!isMessagesPanelNearBottom()) {
+        logScrollDebug("mark_read skipped", { reason: "not near bottom" });
+        return;
+      }
       markChatRead();
     };
 
@@ -640,7 +777,7 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisible);
       window.removeEventListener("focus", handleVisible);
     };
-  }, [authenticated, member, membersLoaded, entryScrollSettled, visibleMessages.length, markChatRead]);
+  }, [authenticated, member, membersLoaded, entryScrollSettled, visibleMessages.length, markChatRead, logScrollDebug]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
@@ -693,7 +830,12 @@ export default function HomePage() {
           filter: `chat_id=eq.${chatId}`
         },
         () => {
-          fetchMessagesRef.current();
+          if (!entryScrollSettledRef.current) {
+            logScrollDebug("realtime fetch skipped", { reason: "entry phase", event: "INSERT" });
+            return;
+          }
+          logScrollDebug("realtime fetch", { event: "INSERT" });
+          fetchMessagesRef.current({ reason: "realtime insert" });
         }
       )
       .on(
@@ -705,7 +847,12 @@ export default function HomePage() {
           filter: `chat_id=eq.${chatId}`
         },
         () => {
-          fetchMessagesRef.current();
+          if (!entryScrollSettledRef.current) {
+            logScrollDebug("realtime fetch skipped", { reason: "entry phase", event: "UPDATE" });
+            return;
+          }
+          logScrollDebug("realtime fetch", { event: "UPDATE" });
+          fetchMessagesRef.current({ reason: "realtime update" });
         }
       )
       .subscribe();
@@ -713,28 +860,38 @@ export default function HomePage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [authenticated, chat, chatId, supabase]);
+  }, [authenticated, chat, chatId, logScrollDebug, supabase]);
 
   useEffect(() => {
     if (!authenticated || !member) return;
 
-    const intervalId = window.setInterval(() => fetchMessagesRef.current(), MESSAGE_POLL_MS);
-    const handleFocus = () => fetchMessagesRef.current();
+    const fetchAfterEntry = (reason: string) => {
+      if (!entryScrollSettledRef.current) {
+        logScrollDebug(`${reason} fetch skipped`, { reason: "entry phase" });
+        return;
+      }
+      logScrollDebug(`${reason} fetch`);
+      fetchMessagesRef.current({ reason });
+    };
+
+    const intervalId = window.setInterval(() => fetchAfterEntry("polling"), MESSAGE_POLL_MS);
+    const handleFocus = () => fetchAfterEntry("focus");
+    const handleOnline = () => fetchAfterEntry("online");
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") fetchMessagesRef.current();
+      if (document.visibilityState === "visible") fetchAfterEntry("visibilitychange");
     };
 
     window.addEventListener("focus", handleFocus);
-    window.addEventListener("online", handleFocus);
+    window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       window.clearInterval(intervalId);
       window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("online", handleFocus);
+      window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [authenticated, member, memberId]);
+  }, [authenticated, member, memberId, logScrollDebug]);
 
   useEffect(() => {
     document.title = newMessageCount > 0 ? `(${newMessageCount}) Семейный чат` : "Семейный чат";
@@ -770,13 +927,15 @@ export default function HomePage() {
     const handleScroll = () => {
       if (document.visibilityState === "visible" && isMessagesPanelNearBottom()) {
         markChatRead();
+      } else {
+        logScrollDebug("mark_read skipped", { reason: "scroll not readable", visible: document.visibilityState === "visible" });
       }
     };
 
     panel.addEventListener("scroll", handleScroll, { passive: true });
     handleScroll();
     return () => panel.removeEventListener("scroll", handleScroll);
-  }, [authenticated, member, entryScrollSettled, visibleMessages.length, markChatRead]);
+  }, [authenticated, member, entryScrollSettled, visibleMessages.length, markChatRead, logScrollDebug]);
 
   useLayoutEffect(() => {
     if (!authenticated || !member || !membersLoaded || entryScrollSettled || !entryScrollPendingRef.current) return;
@@ -785,6 +944,12 @@ export default function HomePage() {
 
     entryScrollTargetRef.current = entryScrollTarget;
     entryScrollPendingRef.current = false;
+    logScrollDebug("entry scroll target selected", {
+      target: entryScrollTarget,
+      firstUnreadId: firstUnreadMessage?.id ?? null,
+      firstUnreadCreatedAt: firstUnreadMessage?.created_at ?? null,
+      lastReadAt
+    });
     if (entryScrollFallbackTimeoutRef.current) window.clearTimeout(entryScrollFallbackTimeoutRef.current);
     entryScrollFallbackTimeoutRef.current = window.setTimeout(() => {
       const target = entryScrollTargetRef.current;
@@ -802,7 +967,10 @@ export default function HomePage() {
     completeEntryScroll,
     performEntryScroll,
     scrollBottomInstant,
-    scrollUnreadAnchorInstant
+    scrollUnreadAnchorInstant,
+    firstUnreadMessage,
+    lastReadAt,
+    logScrollDebug
   ]);
 
   useEffect(() => {
@@ -810,12 +978,20 @@ export default function HomePage() {
     if (!initialMessagesLoadedRef.current) return;
 
     const repeatEntryScrollIfNeeded = () => {
-      if (!entryScrollPendingRef.current && !entryScrollGuardActiveRef.current) return;
+      if (!entryScrollPendingRef.current && !entryScrollGuardActiveRef.current) {
+        logScrollDebug("entry repeat skipped", { reason: "not in entry phase" });
+        return;
+      }
+      logScrollDebug("entry repeat scroll", { settle: !entryScrollSettled });
       performEntryScroll(!entryScrollSettled);
     };
 
-    const handlePageShow = () => repeatEntryScrollIfNeeded();
+    const handlePageShow = () => {
+      logScrollDebug("pageshow");
+      repeatEntryScrollIfNeeded();
+    };
     const handleVisibilityChange = () => {
+      logScrollDebug("visibilitychange", { state: document.visibilityState });
       if (document.visibilityState === "visible") repeatEntryScrollIfNeeded();
     };
 
@@ -825,7 +1001,7 @@ export default function HomePage() {
       window.removeEventListener("pageshow", handlePageShow);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [authenticated, member, membersLoaded, currentChatMember, entryScrollSettled, performEntryScroll]);
+  }, [authenticated, member, membersLoaded, currentChatMember, entryScrollSettled, performEntryScroll, logScrollDebug]);
 
   function readStoredMember() {
     const id = localStorage.getItem(MEMBER_ID_KEY);
@@ -964,17 +1140,22 @@ export default function HomePage() {
     loadMembers();
   }
 
-  async function fetchMessages(options: { initial?: boolean; forceScroll?: boolean } = {}) {
+  async function fetchMessages(options: { initial?: boolean; forceScroll?: boolean; reason?: string } = {}) {
     if (fetchingMessagesRef.current) {
       pendingMessagesFetchRef.current = true;
+      logScrollDebug("messages fetch queued", { reason: options.reason ?? "unknown" });
       return;
     }
 
     fetchingMessagesRef.current = true;
+    logScrollDebug("messages fetch started", { reason: options.reason ?? "unknown", initial: Boolean(options.initial) });
 
     try {
       const response = await fetch("/api/messages");
-      if (!response.ok) return;
+      if (!response.ok) {
+        logScrollDebug("messages fetch failed", { reason: options.reason ?? "unknown", status: response.status });
+        return;
+      }
       const data = await response.json();
       const nextMessages = dedupeMessages(data.messages || []);
       const isInitialLoad = options.initial || !initialMessagesLoadedRef.current;
@@ -993,6 +1174,13 @@ export default function HomePage() {
 
       setMessages(dedupeMessages(nextMessages));
       knownMessageIdsRef.current = nextKnownIds;
+      logScrollDebug("messages loaded", {
+        reason: options.reason ?? "unknown",
+        initial: isInitialLoad,
+        count: nextMessages.length,
+        newForeignCount: newForeignMessages.length,
+        wasNearBottom
+      });
 
       if (isInitialLoad) {
         initialMessagesLoadedRef.current = true;
@@ -1017,12 +1205,13 @@ export default function HomePage() {
       fetchingMessagesRef.current = false;
       if (pendingMessagesFetchRef.current) {
         pendingMessagesFetchRef.current = false;
-        fetchMessages();
+        fetchMessages({ reason: "queued" });
       }
     }
   }
 
   async function loadMembers() {
+    logScrollDebug("members fetch started");
     const response = await fetch("/api/members");
     if (!response.ok) {
       setConnectionError("Ошибка подключения. Сохраненный участник не удален.");
@@ -1031,6 +1220,11 @@ export default function HomePage() {
     const data = await response.json();
     setMembers(data.members || []);
     setMembersLoaded(true);
+    logScrollDebug("members loaded", {
+      count: data.members?.length ?? 0,
+      currentMemberId: memberRef.current?.id ?? null,
+      currentMemberLastReadAt: (data.members || []).find((chatMember: ChatMember) => chatMember.id === memberRef.current?.id)?.last_read_at ?? null
+    });
     setConnectionError("");
   }
 
