@@ -462,6 +462,22 @@ h1 {
   gap: 5px 10px;
 }
 
+.badge-debug-title {
+  color: var(--ink);
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.badge-debug-warning {
+  border-radius: 10px;
+  background: rgba(255, 244, 231, 0.96);
+  color: var(--coral-dark);
+  font-weight: 700;
+  line-height: 1.35;
+  margin-bottom: 8px;
+  padding: 8px;
+}
+
 .badge-debug-agent,
 .badge-debug-status {
   margin-top: 8px;
