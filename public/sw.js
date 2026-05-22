@@ -24,6 +24,8 @@ self.addEventListener("fetch", (event) => {
 });
 
 const CHAT_NOTIFICATION_TAG = "family-chat-new-message";
+const BADGE_DEBUG_CACHE = "family-chat-badge-debug";
+const BADGE_DEBUG_REQUEST = "/__family-chat-badge-debug";
 
 function isLocalDev() {
   return self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
@@ -31,6 +33,37 @@ function isLocalDev() {
 
 function debugBadge(message, data) {
   if (isLocalDev()) console.debug(`[sw] ${message}`, data || "");
+}
+
+async function readBadgeDebugState() {
+  if (!("caches" in self)) return { enabled: false, events: [] };
+  const cache = await caches.open(BADGE_DEBUG_CACHE);
+  const response = await cache.match(BADGE_DEBUG_REQUEST);
+  return response ? response.json().catch(() => ({ enabled: false, events: [] })) : { enabled: false, events: [] };
+}
+
+async function writeBadgeDebugState(state) {
+  if (!("caches" in self)) return;
+  const cache = await caches.open(BADGE_DEBUG_CACHE);
+  await cache.put(BADGE_DEBUG_REQUEST, new Response(JSON.stringify(state), { headers: { "Content-Type": "application/json" } }));
+}
+
+async function logBadgeEvent(event, data) {
+  const state = await readBadgeDebugState();
+  if (!state.enabled) return;
+  const nextEvent = {
+    event,
+    at: new Date().toISOString(),
+    data: {
+      ...(data || {}),
+      userAgent: self.navigator?.userAgent || "",
+      platform: self.navigator?.platform || ""
+    }
+  };
+  await writeBadgeDebugState({
+    enabled: true,
+    events: [...(state.events || []), nextEvent].slice(-50)
+  });
 }
 
 async function closeChatNotifications() {
@@ -42,14 +75,25 @@ async function closeChatNotifications() {
 }
 
 async function applyUnreadBadge(unreadCount) {
-  if (unreadCount > 0 && "setAppBadge" in self.registration) {
-    await self.registration.setAppBadge(unreadCount).catch(() => undefined);
+  const setSupported = "setAppBadge" in self.registration;
+  const clearSupported = "clearAppBadge" in self.registration;
+  await logBadgeEvent("badge support", { unreadCount, setAppBadge: setSupported, clearAppBadge: clearSupported });
+
+  if (unreadCount > 0 && setSupported) {
+    await logBadgeEvent("setAppBadge called", { unreadCount });
+    try {
+      await self.registration.setAppBadge(unreadCount);
+      await logBadgeEvent("setAppBadge success", { unreadCount });
+    } catch (error) {
+      await logBadgeEvent("setAppBadge error", { unreadCount, error: String(error) });
+    }
     debugBadge("setAppBadge", { unreadCount });
     return;
   }
 
-  if (unreadCount <= 0 && "clearAppBadge" in self.registration) {
-    await self.registration.clearAppBadge().catch(() => undefined);
+  if (unreadCount <= 0 && clearSupported) {
+    await logBadgeEvent("clearAppBadge called", { reason: "push unreadCount <= 0", source: "service worker" });
+    await self.registration.clearAppBadge().catch((error) => logBadgeEvent("clearAppBadge error", { reason: "push unreadCount <= 0", error: String(error) }));
     debugBadge("clearAppBadge");
   }
 }
@@ -79,6 +123,7 @@ self.addEventListener("push", (event) => {
 
   event.waitUntil(
     Promise.all([
+      logBadgeEvent("push received", { messageId: payload.messageId || null, unreadCount }),
       self.registration.showNotification(title, options),
       applyUnreadBadge(unreadCount)
     ])
@@ -92,7 +137,8 @@ self.addEventListener("notificationclick", (event) => {
 
   event.waitUntil(
     Promise.all([
-      "clearAppBadge" in self.registration ? self.registration.clearAppBadge().catch(() => undefined) : Promise.resolve(),
+      logBadgeEvent("clearAppBadge called", { reason: "notificationclick", source: "service worker" }),
+      "clearAppBadge" in self.registration ? self.registration.clearAppBadge().catch((error) => logBadgeEvent("clearAppBadge error", { reason: "notificationclick", error: String(error) })) : Promise.resolve(),
       closeChatNotifications(),
       self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
         const existingClient = clients.find((client) => client.url === url);
@@ -104,11 +150,21 @@ self.addEventListener("notificationclick", (event) => {
 });
 
 self.addEventListener("message", (event) => {
+  if (event.data?.type === "family-chat-badge-debug-enable") {
+    event.waitUntil(
+      readBadgeDebugState().then((state) => writeBadgeDebugState({ enabled: true, events: state.events || [] }))
+    );
+    return;
+  }
+
   if (event.data?.type !== "family-chat-clear-badge") return;
+
+  const reason = event.data?.reason || "service worker message";
 
   event.waitUntil(
     Promise.all([
-      "clearAppBadge" in self.registration ? self.registration.clearAppBadge().catch(() => undefined) : Promise.resolve(),
+      logBadgeEvent("clearAppBadge called", { reason, source: "service worker message" }),
+      "clearAppBadge" in self.registration ? self.registration.clearAppBadge().catch((error) => logBadgeEvent("clearAppBadge error", { reason, error: String(error) })) : Promise.resolve(),
       closeChatNotifications()
     ])
   );

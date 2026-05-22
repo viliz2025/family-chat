@@ -53,15 +53,25 @@ type ScrollDebugEvent = {
   data?: Record<string, unknown>;
 };
 
+type BadgeDebugEvent = {
+  event: string;
+  at: string;
+  data?: Record<string, unknown>;
+};
+
 declare global {
   interface Window {
     __familyChatScrollDebug?: ScrollDebugEvent[];
+    __familyChatBadgeDebug?: BadgeDebugEvent[];
   }
 }
 
 const MEMBER_ID_KEY = "family_chat_member_id";
 const MEMBER_NAME_KEY = "family_chat_member_name";
 const NOTIFICATION_SOUND_KEY = "family_chat_notification_sound";
+const BADGE_DEBUG_KEY = "family_chat_debug_badge";
+const BADGE_DEBUG_CACHE = "family-chat-badge-debug";
+const BADGE_DEBUG_REQUEST = "/__family-chat-badge-debug";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PIN_PATTERN = /^\d{4}$/;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000;
@@ -212,17 +222,78 @@ export default function HomePage() {
     [isScrollDebugEnabled]
   );
 
-  const clearAppBadgeCount = useCallback(() => {
+  const isBadgeDebugEnabled = useCallback(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("debugBadge") === "1" || localStorage.getItem(BADGE_DEBUG_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const readBadgeDebugState = useCallback(async () => {
+    if (!("caches" in window)) return { enabled: false, events: [] as BadgeDebugEvent[] };
+    const cache = await caches.open(BADGE_DEBUG_CACHE);
+    const response = await cache.match(BADGE_DEBUG_REQUEST);
+    return response ? ((await response.json().catch(() => ({ enabled: false, events: [] }))) as { enabled?: boolean; events?: BadgeDebugEvent[] }) : { enabled: false, events: [] };
+  }, []);
+
+  const writeBadgeDebugState = useCallback(async (state: { enabled?: boolean; events?: BadgeDebugEvent[] }) => {
+    if (!("caches" in window)) return;
+    const cache = await caches.open(BADGE_DEBUG_CACHE);
+    await cache.put(BADGE_DEBUG_REQUEST, new Response(JSON.stringify(state), { headers: { "Content-Type": "application/json" } }));
+  }, []);
+
+  const logBadgeDebug = useCallback(
+    async (event: string, data: Record<string, unknown> = {}) => {
+      if (!isBadgeDebugEnabled()) return;
+      const current = await readBadgeDebugState();
+      const nextEvent: BadgeDebugEvent = {
+        event,
+        at: new Date().toISOString(),
+        data: {
+          ...data,
+          userAgent: navigator.userAgent,
+          platform: navigator.platform
+        }
+      };
+      const events = [...(current.events || []), nextEvent].slice(-50);
+      window.__familyChatBadgeDebug = events;
+      await writeBadgeDebugState({ enabled: true, events });
+      console.debug("[badge-debug]", nextEvent);
+    },
+    [isBadgeDebugEnabled, readBadgeDebugState, writeBadgeDebugState]
+  );
+
+  useEffect(() => {
+    if (!isBadgeDebugEnabled()) return;
+    localStorage.setItem(BADGE_DEBUG_KEY, "1");
+
+    readBadgeDebugState()
+      .then((state) => {
+        const events = state.events || [];
+        window.__familyChatBadgeDebug = events;
+        return writeBadgeDebugState({ enabled: true, events });
+      })
+      .then(() => navigator.serviceWorker?.ready)
+      .then((registration) => {
+        registration?.active?.postMessage({ type: "family-chat-badge-debug-enable" });
+      })
+      .then(() => logBadgeDebug("debug enabled", { source: "app" }))
+      .catch(() => undefined);
+  }, [isBadgeDebugEnabled, logBadgeDebug, readBadgeDebugState, writeBadgeDebugState]);
+
+  const clearAppBadgeCount = useCallback((reason = "other") => {
+    void logBadgeDebug("clearAppBadge called", { reason, source: "app" });
     const badgeNavigator = navigator as Navigator & {
       clearAppBadge?: () => Promise<void>;
     };
-    badgeNavigator.clearAppBadge?.().catch(() => undefined);
+    badgeNavigator.clearAppBadge?.().catch((error) => void logBadgeDebug("clearAppBadge error", { reason, error: String(error) }));
     if (process.env.NODE_ENV !== "production") console.debug("[badge] clearAppBadge");
 
     if (!("serviceWorker" in navigator)) return;
     navigator.serviceWorker.ready
       .then((registration) => {
-        registration.active?.postMessage({ type: "family-chat-clear-badge" });
+        registration.active?.postMessage({ type: "family-chat-clear-badge", reason });
         return registration.getNotifications?.({ tag: "family-chat-new-message" });
       })
       .then((notifications) => {
@@ -231,11 +302,11 @@ export default function HomePage() {
         if (process.env.NODE_ENV !== "production") console.debug("[badge] closed notifications", notifications.length);
       })
       .catch(() => undefined);
-  }, []);
+  }, [logBadgeDebug]);
 
-  const clearUnreadIndicators = useCallback(() => {
+  const clearUnreadIndicators = useCallback((reason = "other") => {
     setNewMessageCount(0);
-    clearAppBadgeCount();
+    clearAppBadgeCount(reason);
   }, [clearAppBadgeCount]);
 
   const markChatRead = useCallback(async () => {
@@ -281,7 +352,7 @@ export default function HomePage() {
     );
     entryReadSyncedRef.current = true;
     entryUnreadPendingRef.current = false;
-    clearUnreadIndicators();
+    clearUnreadIndicators("mark_read");
   }, [member, clearUnreadIndicators, logScrollDebug]);
 
   const scrollToElement = useCallback(
@@ -677,7 +748,7 @@ export default function HomePage() {
     if (!authenticated || !chat) return;
     logScrollDebug("entry phase started", { chatId: chat.id });
     setMembersLoaded(false);
-    clearUnreadIndicators();
+    setNewMessageCount(0);
     setLastReadAt(null);
     setUnreadDividerMessageId(null);
     setUnreadDividerHoldUntil(0);
@@ -1194,7 +1265,7 @@ export default function HomePage() {
 
       newForeignMessages.forEach((message) => notifiedMessageIdsRef.current.add(message.id));
       if (document.visibilityState === "visible" && entryScrollSettled && wasNearBottom) {
-        clearUnreadIndicators();
+        clearUnreadIndicators("visible_near_bottom");
         return;
       }
 
@@ -1389,7 +1460,7 @@ export default function HomePage() {
     setEmojiOpen(false);
     setImageViewerUrl(null);
     setIsUploadingImage(false);
-    clearUnreadIndicators();
+    clearUnreadIndicators("logout");
     setEntryScrollSettled(false);
     fetchingMessagesRef.current = false;
     pendingMessagesFetchRef.current = false;
@@ -1530,7 +1601,7 @@ export default function HomePage() {
   }
 
   function handleNewMessageClick() {
-    clearUnreadIndicators();
+    clearUnreadIndicators("new_message_click");
     scrollOnNextMessagesRef.current = true;
     scrollToLatestMessage();
   }
