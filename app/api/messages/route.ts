@@ -23,6 +23,10 @@ async function getChatId() {
   return chat.id as string;
 }
 
+function getImageProxyUrl(path: string) {
+  return `/api/images?path=${encodeURIComponent(path)}`;
+}
+
 export async function GET() {
   if (!hasValidSession()) {
     return NextResponse.json({ error: "Нужен вход" }, { status: 401 });
@@ -43,7 +47,7 @@ export async function GET() {
     return NextResponse.json({ error: "Не удалось загрузить сообщения" }, { status: 500 });
   }
 
-  return NextResponse.json({ messages: await withImageUrls(supabase, [...(data || [])].reverse()) });
+  return NextResponse.json({ messages: await withImageUrls([...(data || [])].reverse()) });
 }
 
 export async function POST(request: Request) {
@@ -155,7 +159,7 @@ async function createImageMessageFromPath(body: any) {
     senderName: member.name,
     messageId: data.id
   }).catch(() => undefined);
-  const [message] = await withImageUrls(supabase, [data]);
+  const [message] = await withImageUrls([data]);
   return NextResponse.json({ message });
 }
 
@@ -167,7 +171,7 @@ async function createImageMessage(request: Request) {
   if (!memberId) return NextResponse.json({ error: "РќСѓР¶РµРЅ СѓС‡Р°СЃС‚РЅРёРє" }, { status: 400 });
   if (!(file instanceof File)) return NextResponse.json({ error: "РќСѓР¶РЅРѕ С„РѕС‚Рѕ" }, { status: 400 });
   if (!IMAGE_TYPES[file.type]) return NextResponse.json({ error: "РџРѕРґРґРµСЂР¶РёРІР°СЋС‚СЃСЏ С‚РѕР»СЊРєРѕ jpg, png Рё webp" }, { status: 400 });
-  if (file.size > MAX_IMAGE_SIZE) return NextResponse.json({ error: "Р¤РѕС‚Рѕ РґРѕР»Р¶РЅРѕ Р±С‹С‚СЊ РґРѕ 5 РњР‘" }, { status: 400 });
+  if (file.size > MAX_IMAGE_SIZE) return NextResponse.json({ error: "Фото должно быть до 20 МБ" }, { status: 400 });
 
   const chatId = await getChatId();
   if (!chatId) return NextResponse.json({ error: "Р§Р°С‚ РЅРµ РЅР°СЃС‚СЂРѕРµРЅ" }, { status: 500 });
@@ -209,7 +213,7 @@ async function createImageMessage(request: Request) {
     senderName: member.name,
     messageId: data.id
   }).catch(() => undefined);
-  const [updatedMessage] = await withImageUrls(supabase, [data]);
+  const [updatedMessage] = await withImageUrls([data]);
   return NextResponse.json({ message: updatedMessage });
 }
 
@@ -259,16 +263,13 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Не удалось удалить сообщение" }, { status: 500 });
   }
 
-  const [updatedMessage] = await withImageUrls(supabase, [data]);
+  const [updatedMessage] = await withImageUrls([data]);
   return NextResponse.json({ message: updatedMessage });
 }
 
-async function withImageUrls(supabase: ReturnType<typeof createSupabaseAdmin>, messages: any[]) {
-  return Promise.all(
-    messages.map(async (message) => {
-      if (message.type !== "image" || message.deleted_at) return message;
-      const { data } = await supabase.storage.from(PHOTO_BUCKET).createSignedUrl(message.text, 60 * 60);
-      return { ...message, image_url: data?.signedUrl || null };
-    })
-  );
+async function withImageUrls(messages: any[]) {
+  return messages.map((message) => {
+    if (message.type !== "image" || message.deleted_at) return message;
+    return { ...message, image_url: getImageProxyUrl(message.text) };
+  });
 }

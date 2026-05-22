@@ -1,0 +1,3 @@
+MEDIA_TOKEN_SECRET=replace-with-the-same-secret-as-nextjs
+ALLOWED_ORIGIN=http://localhost:3000
+MAX_IMAGE_SIZE_BYTES=20971520

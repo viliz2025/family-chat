@@ -69,6 +69,7 @@ const HEARTBEAT_MS = 45 * 1000;
 const MESSAGE_POLL_MS = 8 * 1000;
 const SYSTEM_MESSAGE_VISIBLE_MS = 5 * 1000;
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024;
+const MEDIA_UPLOAD_URL = process.env.NEXT_PUBLIC_MEDIA_UPLOAD_URL || "";
 const IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
 const QUICK_EMOJIS = [
   "😊",
@@ -1271,6 +1272,30 @@ export default function HomePage() {
     });
   }
 
+  function addSentMessage(message: Message) {
+    loadMembers();
+    knownMessageIdsRef.current.add(message.id);
+    notifiedMessageIdsRef.current.add(message.id);
+    scrollOnNextMessagesRef.current = true;
+    setMessages((current) => {
+      if (current.some((currentMessage) => currentMessage.id === message.id)) return current;
+      return dedupeMessages([...current, message]);
+    });
+  }
+
+  async function createImageMessageFromPath(imagePath: string) {
+    const response = await fetch("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        member_id: member?.id,
+        image_path: imagePath
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    return { response, data };
+  }
+
   async function handleImageSelect(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -1289,6 +1314,65 @@ export default function HomePage() {
     setSendError("");
     setEmojiOpen(false);
     setIsUploadingImage(true);
+
+    if (MEDIA_UPLOAD_URL) {
+      const tokenResponse = await fetch("/api/media-token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "upload",
+          member_id: member.id
+        })
+      });
+      const tokenData = await tokenResponse.json().catch(() => ({}));
+
+      if (!tokenResponse.ok || !tokenData.chat_id || !tokenData.token) {
+        setIsUploadingImage(false);
+        setSendError(getImageUploadError(tokenResponse.status, tokenData.error));
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("member_id", member.id);
+      formData.append("chat_id", tokenData.chat_id);
+      formData.append("token", tokenData.token);
+      formData.append("image", file);
+
+      const uploadResponse = await fetch(MEDIA_UPLOAD_URL, {
+        method: "POST",
+        body: formData,
+        credentials: "include"
+      });
+      const uploadData = await uploadResponse.json().catch(() => ({}));
+
+      if (!uploadResponse.ok) {
+        setIsUploadingImage(false);
+        setSendError(getImageUploadError(uploadResponse.status, uploadData.error));
+        return;
+      }
+
+      const imagePath = typeof uploadData.path === "string" ? uploadData.path : "";
+      if (!imagePath) {
+        setIsUploadingImage(false);
+        setSendError("Не удалось загрузить фото");
+        return;
+      }
+
+      const { response, data } = await createImageMessageFromPath(imagePath);
+      setIsUploadingImage(false);
+
+      if (!response.ok) {
+        if (response.status === 403) {
+          clearStoredMember();
+          setMember(null);
+        }
+        setSendError(getImageUploadError(response.status, data.error));
+        return;
+      }
+
+      addSentMessage(data.message);
+      return;
+    }
 
     const prepareResponse = await fetch("/api/messages", {
       method: "POST",
@@ -1321,15 +1405,7 @@ export default function HomePage() {
       return;
     }
 
-    const response = await fetch("/api/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        member_id: member.id,
-        image_path: prepared.path
-      })
-    });
-    const data = await response.json().catch(() => ({}));
+    const { response, data } = await createImageMessageFromPath(prepared.path);
     setIsUploadingImage(false);
 
     if (!response.ok) {
@@ -1341,14 +1417,7 @@ export default function HomePage() {
       return;
     }
 
-    loadMembers();
-    knownMessageIdsRef.current.add(data.message.id);
-    notifiedMessageIdsRef.current.add(data.message.id);
-    scrollOnNextMessagesRef.current = true;
-    setMessages((current) => {
-      if (current.some((message) => message.id === data.message.id)) return current;
-      return dedupeMessages([...current, data.message]);
-    });
+    addSentMessage(data.message);
   }
 
   function getImageUploadError(status: number, error?: string) {

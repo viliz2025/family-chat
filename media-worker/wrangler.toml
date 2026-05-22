@@ -1,0 +1,10 @@
+name = "family-chat-media"
+main = "src/index.ts"
+compatibility_date = "2026-05-22"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "family-chat-photos"
+
+[vars]
+MAX_IMAGE_SIZE_BYTES = "20971520"
