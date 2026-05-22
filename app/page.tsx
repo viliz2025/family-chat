@@ -447,6 +447,17 @@ export default function HomePage() {
       .catch(() => undefined);
   }, [logBadgeDebug, readBadgeDebugState, refreshBadgeDebug, writeBadgeDebugState]);
 
+  const openBadgeDebugPanel = useCallback(() => {
+    localStorage.setItem(BADGE_DEBUG_KEY, "1");
+    setBadgeDebugUnlocked(true);
+    badgeDebugTapCountRef.current = 0;
+    readBadgeDebugState()
+      .then((state) => writeBadgeDebugState({ enabled: true, events: state.events || [] }))
+      .then(() => refreshBadgeDebug())
+      .then(() => logBadgeDebug("debug opened from button", { source: "app" }))
+      .catch(() => undefined);
+  }, [logBadgeDebug, readBadgeDebugState, refreshBadgeDebug, writeBadgeDebugState]);
+
   const handleChatTitleTap = useCallback(() => {
     if (showBadgeDebugPanel) return;
     badgeDebugTapCountRef.current += 1;
@@ -2018,6 +2029,11 @@ export default function HomePage() {
               )}
               {pushNotice && <p className="install-hint">{pushNotice}</p>}
             </>
+          )}
+          {member && (
+            <button className="badge-debug-open-button" type="button" onClick={openBadgeDebugPanel}>
+              Диагностика badge
+            </button>
           )}
           {showBadgeDebugPanel && (
             <section className="badge-debug-panel" aria-label="Badge debug">

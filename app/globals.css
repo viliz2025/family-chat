@@ -435,6 +435,18 @@ h1 {
   color: var(--sage);
 }
 
+.badge-debug-open-button {
+  width: fit-content;
+  margin: 6px 0 0 58px;
+  border: 1px solid rgba(96, 69, 53, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 253, 248, 0.86);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 9px;
+}
+
 .chat-top .install-hint {
   width: fit-content;
   max-width: calc(100% - 58px);
