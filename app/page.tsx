@@ -141,6 +141,8 @@ export default function HomePage() {
     autoStatus: "",
     copyStatus: ""
   });
+  const [badgeDebugUnlocked, setBadgeDebugUnlocked] = useState(false);
+  const badgeDebugTapCountRef = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const unreadAnchorRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -240,6 +242,7 @@ export default function HomePage() {
       return false;
     }
   }, []);
+  const showBadgeDebugPanel = badgeDebugUnlocked;
 
   const readBadgeDebugState = useCallback(async () => {
     if (!("caches" in window)) return { enabled: false, events: [] as BadgeDebugEvent[] };
@@ -279,6 +282,10 @@ export default function HomePage() {
     },
     [isBadgeDebugEnabled, readBadgeDebugState, writeBadgeDebugState]
   );
+
+  useEffect(() => {
+    if (isBadgeDebugEnabled()) setBadgeDebugUnlocked(true);
+  }, [isBadgeDebugEnabled]);
 
   useEffect(() => {
     if (!isBadgeDebugEnabled()) return;
@@ -428,6 +435,23 @@ export default function HomePage() {
     await navigator.clipboard?.writeText(summary);
     setBadgeDebugInfo((current) => ({ ...current, copyStatus: "Скопировано" }));
   }, [badgeDebugEvents, badgeDebugInfo, readBadgeDebugState]);
+
+  const unlockBadgeDebug = useCallback(() => {
+    localStorage.setItem(BADGE_DEBUG_KEY, "1");
+    setBadgeDebugUnlocked(true);
+    badgeDebugTapCountRef.current = 0;
+    readBadgeDebugState()
+      .then((state) => writeBadgeDebugState({ enabled: true, events: state.events || [] }))
+      .then(() => refreshBadgeDebug())
+      .then(() => logBadgeDebug("debug unlocked from header taps", { source: "app" }))
+      .catch(() => undefined);
+  }, [logBadgeDebug, readBadgeDebugState, refreshBadgeDebug, writeBadgeDebugState]);
+
+  const handleChatTitleTap = useCallback(() => {
+    if (showBadgeDebugPanel) return;
+    badgeDebugTapCountRef.current += 1;
+    if (badgeDebugTapCountRef.current >= 7) unlockBadgeDebug();
+  }, [showBadgeDebugPanel, unlockBadgeDebug]);
 
   const clearAppBadgeCount = useCallback((reason = "other") => {
     void logBadgeDebug("clearAppBadge called", { reason, source: "app" });
@@ -1969,7 +1993,7 @@ export default function HomePage() {
               ‹
             </button>
             <div>
-              <h1 className="chat-title">Семейный чат</h1>
+              <h1 className="chat-title" onClick={handleChatTitleTap}>Семейный чат</h1>
               <p className="chat-subtitle">
                 <span /> для своих
               </p>
@@ -1995,7 +2019,7 @@ export default function HomePage() {
               {pushNotice && <p className="install-hint">{pushNotice}</p>}
             </>
           )}
-          {isBadgeDebugEnabled() && (
+          {showBadgeDebugPanel && (
             <section className="badge-debug-panel" aria-label="Badge debug">
               <p className="badge-debug-title">Проверка badge на iPhone</p>
               {badgeDebugInfo.launchMode === "Safari" && (
