@@ -53,25 +53,15 @@ type ScrollDebugEvent = {
   data?: Record<string, unknown>;
 };
 
-type BadgeDebugEvent = {
-  event: string;
-  at: string;
-  data?: Record<string, unknown>;
-};
-
 declare global {
   interface Window {
     __familyChatScrollDebug?: ScrollDebugEvent[];
-    __familyChatBadgeDebug?: BadgeDebugEvent[];
   }
 }
 
 const MEMBER_ID_KEY = "family_chat_member_id";
 const MEMBER_NAME_KEY = "family_chat_member_name";
 const NOTIFICATION_SOUND_KEY = "family_chat_notification_sound";
-const BADGE_DEBUG_KEY = "family_chat_debug_badge";
-const BADGE_DEBUG_CACHE = "family-chat-badge-debug";
-const BADGE_DEBUG_REQUEST = "/__family-chat-badge-debug";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PIN_PATTERN = /^\d{4}$/;
 const ONLINE_WINDOW_MS = 2 * 60 * 1000;
@@ -130,19 +120,6 @@ export default function HomePage() {
   const [entryScrollSettled, setEntryScrollSettled] = useState(false);
   const [unreadDividerMessageId, setUnreadDividerMessageId] = useState<string | null>(null);
   const [unreadDividerHoldUntil, setUnreadDividerHoldUntil] = useState(0);
-  const [badgeDebugEvents, setBadgeDebugEvents] = useState<BadgeDebugEvent[]>([]);
-  const [badgeDebugInfo, setBadgeDebugInfo] = useState({
-    navigatorSet: false,
-    navigatorClear: false,
-    registrationSet: false,
-    registrationClear: false,
-    userAgent: "",
-    launchMode: "",
-    autoStatus: "",
-    copyStatus: ""
-  });
-  const [badgeDebugUnlocked, setBadgeDebugUnlocked] = useState(false);
-  const badgeDebugTapCountRef = useRef(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const unreadAnchorRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -235,241 +212,11 @@ export default function HomePage() {
     [isScrollDebugEnabled]
   );
 
-  const isBadgeDebugEnabled = useCallback(() => {
-    try {
-      return new URLSearchParams(window.location.search).get("debugBadge") === "1" || localStorage.getItem(BADGE_DEBUG_KEY) === "1";
-    } catch {
-      return false;
-    }
-  }, []);
-  const showBadgeDebugPanel = badgeDebugUnlocked;
-
-  const readBadgeDebugState = useCallback(async () => {
-    if (!("caches" in window)) return { enabled: false, events: [] as BadgeDebugEvent[] };
-    const cache = await caches.open(BADGE_DEBUG_CACHE);
-    const response = await cache.match(BADGE_DEBUG_REQUEST);
-    return response ? ((await response.json().catch(() => ({ enabled: false, events: [] }))) as { enabled?: boolean; events?: BadgeDebugEvent[] }) : { enabled: false, events: [] };
-  }, []);
-
-  const writeBadgeDebugState = useCallback(async (state: { enabled?: boolean; events?: BadgeDebugEvent[] }) => {
-    if (!("caches" in window)) return;
-    const cache = await caches.open(BADGE_DEBUG_CACHE);
-    await cache.put(BADGE_DEBUG_REQUEST, new Response(JSON.stringify(state), { headers: { "Content-Type": "application/json" } }));
-  }, []);
-
-  const isPwaLaunch = useCallback(() => {
-    const standaloneNavigator = navigator as Navigator & { standalone?: boolean };
-    return Boolean(window.matchMedia?.("(display-mode: standalone)").matches || standaloneNavigator.standalone);
-  }, []);
-
-  const logBadgeDebug = useCallback(
-    async (event: string, data: Record<string, unknown> = {}) => {
-      if (!isBadgeDebugEnabled()) return;
-      const current = await readBadgeDebugState();
-      const nextEvent: BadgeDebugEvent = {
-        event,
-        at: new Date().toISOString(),
-        data: {
-          ...data,
-          userAgent: navigator.userAgent,
-          platform: navigator.platform
-        }
-      };
-      const events = [...(current.events || []), nextEvent].slice(-50);
-      window.__familyChatBadgeDebug = events;
-      await writeBadgeDebugState({ enabled: true, events });
-      console.debug("[badge-debug]", nextEvent);
-    },
-    [isBadgeDebugEnabled, readBadgeDebugState, writeBadgeDebugState]
-  );
-
-  useEffect(() => {
-    if (isBadgeDebugEnabled()) setBadgeDebugUnlocked(true);
-  }, [isBadgeDebugEnabled]);
-
-  useEffect(() => {
-    if (!isBadgeDebugEnabled()) return;
-    localStorage.setItem(BADGE_DEBUG_KEY, "1");
-
-    readBadgeDebugState()
-      .then((state) => {
-        const events = state.events || [];
-        window.__familyChatBadgeDebug = events;
-        return writeBadgeDebugState({ enabled: true, events });
-      })
-      .then(() => navigator.serviceWorker?.ready)
-      .then((registration) => {
-        registration?.active?.postMessage({ type: "family-chat-badge-debug-enable" });
-      })
-      .then(() => logBadgeDebug("debug enabled", { source: "app" }))
-      .catch(() => undefined);
-  }, [isBadgeDebugEnabled, logBadgeDebug, readBadgeDebugState, writeBadgeDebugState]);
-
-  const refreshBadgeDebug = useCallback(async () => {
-    const badgeNavigator = navigator as Navigator & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-      clearAppBadge?: () => Promise<void>;
-    };
-    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
-    const badgeRegistration = registration as (ServiceWorkerRegistration & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-      clearAppBadge?: () => Promise<void>;
-    }) | null;
-    const state = await readBadgeDebugState();
-    const events = state.events || [];
-    window.__familyChatBadgeDebug = events;
-    setBadgeDebugEvents(events);
-    setBadgeDebugInfo((current) => ({
-      ...current,
-      navigatorSet: typeof badgeNavigator.setAppBadge === "function",
-      navigatorClear: typeof badgeNavigator.clearAppBadge === "function",
-      registrationSet: typeof badgeRegistration?.setAppBadge === "function",
-      registrationClear: typeof badgeRegistration?.clearAppBadge === "function",
-      launchMode: isPwaLaunch() ? "PWA" : "Safari",
-      userAgent: navigator.userAgent
-    }));
-  }, [isPwaLaunch, readBadgeDebugState]);
-
-  useEffect(() => {
-    if (!isBadgeDebugEnabled()) return;
-    refreshBadgeDebug().catch(() => undefined);
-  }, [isBadgeDebugEnabled, refreshBadgeDebug]);
-
-  const testAppBadge = useCallback(async () => {
-    const badgeNavigator = navigator as Navigator & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-    };
-    const supported = typeof badgeNavigator.setAppBadge === "function";
-    await logBadgeDebug("test app badge requested", { source: "app", value: 7, supported });
-    if (!supported) {
-      await refreshBadgeDebug();
-      return;
-    }
-    try {
-      await badgeNavigator.setAppBadge?.(7);
-      await logBadgeDebug("test app badge success", { source: "app", value: 7, supported });
-    } catch (error) {
-      await logBadgeDebug("test app badge error", { source: "app", value: 7, supported, error: String(error) });
-    }
-    await refreshBadgeDebug();
-  }, [logBadgeDebug, refreshBadgeDebug]);
-
-  const clearAppBadgeDebug = useCallback(async () => {
-    const badgeNavigator = navigator as Navigator & {
-      clearAppBadge?: () => Promise<void>;
-    };
-    const supported = typeof badgeNavigator.clearAppBadge === "function";
-    await logBadgeDebug("clear app badge requested", { source: "app", reason: "debug panel", supported });
-    if (supported) {
-      try {
-        await badgeNavigator.clearAppBadge?.();
-        await logBadgeDebug("clear app badge success", { source: "app", reason: "debug panel", supported });
-      } catch (error) {
-        await logBadgeDebug("clear app badge error", { source: "app", reason: "debug panel", supported, error: String(error) });
-      }
-    }
-    await refreshBadgeDebug();
-  }, [logBadgeDebug, refreshBadgeDebug]);
-
-  const postBadgeDebugMessage = useCallback(async (message: Record<string, unknown>) => {
-    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
-    registration?.active?.postMessage(message);
-  }, []);
-
-  const testSwBadge = useCallback(async () => {
-    await logBadgeDebug("test sw badge requested", { source: "app", value: 8 });
-    await postBadgeDebugMessage({ type: "family-chat-test-sw-badge", unreadCount: 8 });
-    window.setTimeout(() => refreshBadgeDebug().catch(() => undefined), 300);
-  }, [logBadgeDebug, postBadgeDebugMessage, refreshBadgeDebug]);
-
-  const clearSwBadge = useCallback(async () => {
-    await logBadgeDebug("clear sw badge requested", { source: "app", reason: "debug panel" });
-    await postBadgeDebugMessage({ type: "family-chat-clear-sw-badge", reason: "debug panel" });
-    window.setTimeout(() => refreshBadgeDebug().catch(() => undefined), 300);
-  }, [logBadgeDebug, postBadgeDebugMessage, refreshBadgeDebug]);
-
-  const runAutomaticBadgeCheck = useCallback(async () => {
-    setBadgeDebugInfo((current) => ({ ...current, autoStatus: "Проверяем..." }));
-    await refreshBadgeDebug();
-
-    const badgeNavigator = navigator as Navigator & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-    };
-    const pwa = isPwaLaunch();
-    const appSupported = typeof badgeNavigator.setAppBadge === "function";
-    await logBadgeDebug("automatic badge check started", { source: "app", pwa, appSupported });
-
-    let appResult = appSupported ? "success" : "unsupported";
-    if (appSupported) {
-      try {
-        await badgeNavigator.setAppBadge?.(7);
-        await logBadgeDebug("test app badge success", { source: "app", value: 7, supported: true, automatic: true });
-      } catch (error) {
-        appResult = `error: ${String(error)}`;
-        await logBadgeDebug("test app badge error", { source: "app", value: 7, supported: true, automatic: true, error: String(error) });
-      }
-    } else {
-      await logBadgeDebug("test app badge unsupported", { source: "app", value: 7, supported: false, automatic: true });
-    }
-
-    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
-    const badgeRegistration = registration as (ServiceWorkerRegistration & {
-      setAppBadge?: (contents?: number) => Promise<void>;
-    }) | null;
-    const swSupported = typeof badgeRegistration?.setAppBadge === "function";
-    await logBadgeDebug("automatic sw badge check", { source: "app", swSupported });
-    await postBadgeDebugMessage({ type: "family-chat-test-sw-badge", unreadCount: 8 });
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-    await refreshBadgeDebug();
-
-    setBadgeDebugInfo((current) => ({
-      ...current,
-      autoStatus: `Готово: приложение ${appResult === "success" ? "успех" : appResult}; SW ${swSupported ? "команда отправлена" : "API недоступен"}`
-    }));
-  }, [isPwaLaunch, logBadgeDebug, postBadgeDebugMessage, refreshBadgeDebug]);
-
-  const copyBadgeDebug = useCallback(async () => {
-    const state = await readBadgeDebugState();
-    const events = state.events || badgeDebugEvents;
-    const summary = buildBadgeDebugSummary(badgeDebugInfo, events);
-    await navigator.clipboard?.writeText(summary);
-    setBadgeDebugInfo((current) => ({ ...current, copyStatus: "Скопировано" }));
-  }, [badgeDebugEvents, badgeDebugInfo, readBadgeDebugState]);
-
-  const unlockBadgeDebug = useCallback(() => {
-    localStorage.setItem(BADGE_DEBUG_KEY, "1");
-    setBadgeDebugUnlocked(true);
-    badgeDebugTapCountRef.current = 0;
-    readBadgeDebugState()
-      .then((state) => writeBadgeDebugState({ enabled: true, events: state.events || [] }))
-      .then(() => refreshBadgeDebug())
-      .then(() => logBadgeDebug("debug unlocked from header taps", { source: "app" }))
-      .catch(() => undefined);
-  }, [logBadgeDebug, readBadgeDebugState, refreshBadgeDebug, writeBadgeDebugState]);
-
-  const openBadgeDebugPanel = useCallback(() => {
-    localStorage.setItem(BADGE_DEBUG_KEY, "1");
-    setBadgeDebugUnlocked(true);
-    badgeDebugTapCountRef.current = 0;
-    readBadgeDebugState()
-      .then((state) => writeBadgeDebugState({ enabled: true, events: state.events || [] }))
-      .then(() => refreshBadgeDebug())
-      .then(() => logBadgeDebug("debug opened from button", { source: "app" }))
-      .catch(() => undefined);
-  }, [logBadgeDebug, readBadgeDebugState, refreshBadgeDebug, writeBadgeDebugState]);
-
-  const handleChatTitleTap = useCallback(() => {
-    if (showBadgeDebugPanel) return;
-    badgeDebugTapCountRef.current += 1;
-    if (badgeDebugTapCountRef.current >= 7) unlockBadgeDebug();
-  }, [showBadgeDebugPanel, unlockBadgeDebug]);
-
   const clearAppBadgeCount = useCallback((reason = "other") => {
-    void logBadgeDebug("clearAppBadge called", { reason, source: "app" });
     const badgeNavigator = navigator as Navigator & {
       clearAppBadge?: () => Promise<void>;
     };
-    badgeNavigator.clearAppBadge?.().catch((error) => void logBadgeDebug("clearAppBadge error", { reason, error: String(error) }));
+    badgeNavigator.clearAppBadge?.().catch(() => undefined);
     if (process.env.NODE_ENV !== "production") console.debug("[badge] clearAppBadge");
 
     if (!("serviceWorker" in navigator)) return;
@@ -484,7 +231,7 @@ export default function HomePage() {
         if (process.env.NODE_ENV !== "production") console.debug("[badge] closed notifications", notifications.length);
       })
       .catch(() => undefined);
-  }, [logBadgeDebug]);
+  }, []);
 
   const clearUnreadIndicators = useCallback((reason = "other") => {
     setNewMessageCount(0);
@@ -1900,18 +1647,6 @@ export default function HomePage() {
     );
   }
 
-  const lastAppBadgeTest = getLastBadgeEvent(badgeDebugEvents, ["test app badge success", "test app badge error", "test app badge unsupported"]);
-  const lastSwBadgeTest = getLastBadgeEvent(badgeDebugEvents, ["test sw badge success", "test sw badge error", "test sw badge requested"]);
-  const lastClearBadge = getLastBadgeEvent(badgeDebugEvents, [
-    "clearAppBadge called",
-    "clear app badge success",
-    "clear SW badge success",
-    "clear sw badge requested",
-    "clearAppBadge error"
-  ]);
-  const lastPushBadge = getLastBadgeEvent(badgeDebugEvents, ["push received"]);
-  const readableBadgeSummary = buildBadgeDebugSummary(badgeDebugInfo, badgeDebugEvents);
-
   if (loadingSession) {
     return (
       <main className="app-shell">
@@ -2004,7 +1739,7 @@ export default function HomePage() {
               ‹
             </button>
             <div>
-              <h1 className="chat-title" onClick={handleChatTitleTap}>Семейный чат</h1>
+              <h1 className="chat-title">Семейный чат</h1>
               <p className="chat-subtitle">
                 <span /> для своих
               </p>
@@ -2029,51 +1764,6 @@ export default function HomePage() {
               )}
               {pushNotice && <p className="install-hint">{pushNotice}</p>}
             </>
-          )}
-          {member && (
-            <button className="badge-debug-open-button" type="button" onClick={openBadgeDebugPanel}>
-              Диагностика badge
-            </button>
-          )}
-          {showBadgeDebugPanel && (
-            <section className="badge-debug-panel" aria-label="Badge debug">
-              <p className="badge-debug-title">Проверка badge на iPhone</p>
-              {badgeDebugInfo.launchMode === "Safari" && (
-                <p className="badge-debug-warning">Badge на iPhone работает только у приложения, добавленного на экран Домой. Открой чат с иконки на рабочем столе.</p>
-              )}
-              {!badgeDebugInfo.navigatorSet && (
-                <p className="badge-debug-warning">Этот запуск PWA не даёт доступ к badge API. Реальный push не сможет поставить цифру на иконку, пока этот тест не станет доступен.</p>
-              )}
-              <div className="badge-debug-grid">
-                <span>Режим запуска</span>
-                <strong>{badgeDebugInfo.launchMode ? (badgeDebugInfo.launchMode === "PWA" ? "Открыто как PWA" : "Открыто в Safari") : "Определяем..."}</strong>
-                <span>navigator.setAppBadge</span>
-                <strong>{badgeDebugInfo.navigatorSet ? "доступен" : "недоступен"}</strong>
-                <span>serviceWorkerRegistration.setAppBadge</span>
-                <strong>{badgeDebugInfo.registrationSet ? "доступен" : "недоступен"}</strong>
-                <span>Последний тест app badge</span>
-                <strong>{getBadgeEventStatus(lastAppBadgeTest)}</strong>
-                <span>Последний тест SW badge</span>
-                <strong>{getBadgeEventStatus(lastSwBadgeTest)}</strong>
-                <span>Последний clear badge</span>
-                <strong>{getLastClearText(lastClearBadge)}</strong>
-                <span>Последний push</span>
-                <strong>{getLastPushText(lastPushBadge)}</strong>
-              </div>
-              <p className="badge-debug-agent">{badgeDebugInfo.userAgent || "userAgent loading..."}</p>
-              <div className="badge-debug-actions">
-                <button type="button" onClick={runAutomaticBadgeCheck}>Проверить badge автоматически</button>
-                <button type="button" onClick={testAppBadge}>Test app badge 7</button>
-                <button type="button" onClick={clearAppBadgeDebug}>Clear app badge</button>
-                <button type="button" onClick={testSwBadge}>Test SW badge 8</button>
-                <button type="button" onClick={clearSwBadge}>Clear SW badge</button>
-                <button type="button" onClick={() => refreshBadgeDebug().catch(() => undefined)}>Обновить</button>
-                <button type="button" onClick={() => copyBadgeDebug().catch(() => undefined)}>Скопировать результат проверки</button>
-              </div>
-              {badgeDebugInfo.autoStatus && <p className="badge-debug-status">{badgeDebugInfo.autoStatus}</p>}
-              {badgeDebugInfo.copyStatus && <p className="badge-debug-status">{badgeDebugInfo.copyStatus}</p>}
-              <pre className="badge-debug-log">{readableBadgeSummary}</pre>
-            </section>
           )}
           {newMessageCount > 0 && (
             <button className="new-message-banner" type="button" onClick={handleNewMessageClick}>
@@ -2345,63 +2035,6 @@ function dedupeMessages(messages: Message[]) {
   return Array.from(new Map(messages.map((message) => [message.id, message])).values()).sort(
     (first, second) => new Date(first.created_at).getTime() - new Date(second.created_at).getTime()
   );
-}
-
-function getLastBadgeEvent(events: BadgeDebugEvent[], names: string[]) {
-  return [...events].reverse().find((event) => names.includes(event.event)) ?? null;
-}
-
-function getBadgeEventStatus(event: BadgeDebugEvent | null) {
-  if (!event) return "не запускался";
-  if (event.event.includes("success")) return `успех (${formatDebugTime(event.at)})`;
-  if (event.event.includes("unsupported")) return `недоступен (${formatDebugTime(event.at)})`;
-  if (event.event.includes("error")) return `ошибка: ${String(event.data?.error || "неизвестно")} (${formatDebugTime(event.at)})`;
-  return `запущен (${formatDebugTime(event.at)})`;
-}
-
-function getLastClearText(event: BadgeDebugEvent | null) {
-  if (!event) return "нет событий очистки";
-  return `${String(event.data?.reason || event.event)} · ${formatDebugTime(event.at)}`;
-}
-
-function getLastPushText(event: BadgeDebugEvent | null) {
-  if (!event) return "push ещё не записан";
-  return `unreadCount: ${String(event.data?.unreadCount ?? "нет")}; messageId: ${String(event.data?.messageId ?? "нет")}; ${formatDebugTime(event.at)}`;
-}
-
-function buildBadgeDebugSummary(
-  info: { navigatorSet: boolean; navigatorClear: boolean; registrationSet: boolean; registrationClear: boolean; launchMode: string; userAgent: string },
-  events: BadgeDebugEvent[]
-) {
-  const lastAppBadgeTest = getLastBadgeEvent(events, ["test app badge success", "test app badge error", "test app badge unsupported"]);
-  const lastSwBadgeTest = getLastBadgeEvent(events, ["test sw badge success", "test sw badge error", "test sw badge requested"]);
-  const lastClear = getLastBadgeEvent(events, ["clearAppBadge called", "clear app badge success", "clear SW badge success", "clear sw badge requested", "clearAppBadge error"]);
-  const lastPush = getLastBadgeEvent(events, ["push received"]);
-  const clearAfterPush = Boolean(lastClear && lastPush && new Date(lastClear.at).getTime() >= new Date(lastPush.at).getTime());
-
-  return [
-    `Устройство: ${info.userAgent.includes("iPhone") ? "iPhone" : "не iPhone / неизвестно"}`,
-    `Режим: ${info.launchMode || "не определён"}`,
-    `navigator.setAppBadge: ${info.navigatorSet ? "доступен" : "недоступен"}`,
-    `navigator.clearAppBadge: ${info.navigatorClear ? "доступен" : "недоступен"}`,
-    `SW setAppBadge: ${info.registrationSet ? "доступен" : "недоступен"}`,
-    `SW clearAppBadge: ${info.registrationClear ? "доступен" : "недоступен"}`,
-    `app badge test: ${getBadgeEventStatus(lastAppBadgeTest)}`,
-    `SW badge test: ${getBadgeEventStatus(lastSwBadgeTest)}`,
-    `Последний push unreadCount: ${lastPush ? String(lastPush.data?.unreadCount ?? "нет") : "push ещё не записан"}`,
-    `Последний push messageId: ${lastPush ? String(lastPush.data?.messageId ?? "нет") : "push ещё не записан"}`,
-    `clear badge после push: ${clearAfterPush ? `да, ${String(lastClear?.data?.reason || lastClear?.event)}` : "нет"}`,
-    `Последний clear: ${getLastClearText(lastClear)}`,
-    `UserAgent: ${info.userAgent || "не определён"}`
-  ].join("\n");
-}
-
-function formatDebugTime(value: string) {
-  return new Intl.DateTimeFormat("ru-RU", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit"
-  }).format(new Date(value));
 }
 
 function formatMembersSummary(total: number, online: number) {
