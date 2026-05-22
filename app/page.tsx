@@ -130,6 +130,15 @@ export default function HomePage() {
   const [entryScrollSettled, setEntryScrollSettled] = useState(false);
   const [unreadDividerMessageId, setUnreadDividerMessageId] = useState<string | null>(null);
   const [unreadDividerHoldUntil, setUnreadDividerHoldUntil] = useState(0);
+  const [badgeDebugEvents, setBadgeDebugEvents] = useState<BadgeDebugEvent[]>([]);
+  const [badgeDebugInfo, setBadgeDebugInfo] = useState({
+    navigatorSet: false,
+    navigatorClear: false,
+    registrationSet: false,
+    registrationClear: false,
+    userAgent: "",
+    copyStatus: ""
+  });
   const listRef = useRef<HTMLDivElement | null>(null);
   const unreadAnchorRef = useRef<HTMLDivElement | null>(null);
   const bottomAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -281,6 +290,98 @@ export default function HomePage() {
       .then(() => logBadgeDebug("debug enabled", { source: "app" }))
       .catch(() => undefined);
   }, [isBadgeDebugEnabled, logBadgeDebug, readBadgeDebugState, writeBadgeDebugState]);
+
+  const refreshBadgeDebug = useCallback(async () => {
+    const badgeNavigator = navigator as Navigator & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
+    const badgeRegistration = registration as (ServiceWorkerRegistration & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    }) | null;
+    const state = await readBadgeDebugState();
+    const events = state.events || [];
+    window.__familyChatBadgeDebug = events;
+    setBadgeDebugEvents(events);
+    setBadgeDebugInfo((current) => ({
+      ...current,
+      navigatorSet: typeof badgeNavigator.setAppBadge === "function",
+      navigatorClear: typeof badgeNavigator.clearAppBadge === "function",
+      registrationSet: typeof badgeRegistration?.setAppBadge === "function",
+      registrationClear: typeof badgeRegistration?.clearAppBadge === "function",
+      userAgent: navigator.userAgent
+    }));
+  }, [readBadgeDebugState]);
+
+  useEffect(() => {
+    if (!isBadgeDebugEnabled()) return;
+    refreshBadgeDebug().catch(() => undefined);
+  }, [isBadgeDebugEnabled, refreshBadgeDebug]);
+
+  const testAppBadge = useCallback(async () => {
+    const badgeNavigator = navigator as Navigator & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+    };
+    const supported = typeof badgeNavigator.setAppBadge === "function";
+    await logBadgeDebug("test app badge requested", { source: "app", value: 7, supported });
+    if (!supported) {
+      await refreshBadgeDebug();
+      return;
+    }
+    try {
+      await badgeNavigator.setAppBadge?.(7);
+      await logBadgeDebug("test app badge success", { source: "app", value: 7, supported });
+    } catch (error) {
+      await logBadgeDebug("test app badge error", { source: "app", value: 7, supported, error: String(error) });
+    }
+    await refreshBadgeDebug();
+  }, [logBadgeDebug, refreshBadgeDebug]);
+
+  const clearAppBadgeDebug = useCallback(async () => {
+    const badgeNavigator = navigator as Navigator & {
+      clearAppBadge?: () => Promise<void>;
+    };
+    const supported = typeof badgeNavigator.clearAppBadge === "function";
+    await logBadgeDebug("clear app badge requested", { source: "app", reason: "debug panel", supported });
+    if (supported) {
+      try {
+        await badgeNavigator.clearAppBadge?.();
+        await logBadgeDebug("clear app badge success", { source: "app", reason: "debug panel", supported });
+      } catch (error) {
+        await logBadgeDebug("clear app badge error", { source: "app", reason: "debug panel", supported, error: String(error) });
+      }
+    }
+    await refreshBadgeDebug();
+  }, [logBadgeDebug, refreshBadgeDebug]);
+
+  const postBadgeDebugMessage = useCallback(async (message: Record<string, unknown>) => {
+    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
+    registration?.active?.postMessage(message);
+  }, []);
+
+  const testSwBadge = useCallback(async () => {
+    await logBadgeDebug("test sw badge requested", { source: "app", value: 8 });
+    await postBadgeDebugMessage({ type: "family-chat-test-sw-badge", unreadCount: 8 });
+    window.setTimeout(() => refreshBadgeDebug().catch(() => undefined), 300);
+  }, [logBadgeDebug, postBadgeDebugMessage, refreshBadgeDebug]);
+
+  const clearSwBadge = useCallback(async () => {
+    await logBadgeDebug("clear sw badge requested", { source: "app", reason: "debug panel" });
+    await postBadgeDebugMessage({ type: "family-chat-clear-sw-badge", reason: "debug panel" });
+    window.setTimeout(() => refreshBadgeDebug().catch(() => undefined), 300);
+  }, [logBadgeDebug, postBadgeDebugMessage, refreshBadgeDebug]);
+
+  const copyBadgeDebug = useCallback(async () => {
+    const state = await readBadgeDebugState();
+    const payload = {
+      info: badgeDebugInfo,
+      events: state.events || badgeDebugEvents
+    };
+    await navigator.clipboard?.writeText(JSON.stringify(payload, null, 2));
+    setBadgeDebugInfo((current) => ({ ...current, copyStatus: "Скопировано" }));
+  }, [badgeDebugEvents, badgeDebugInfo, readBadgeDebugState]);
 
   const clearAppBadgeCount = useCallback((reason = "other") => {
     void logBadgeDebug("clearAppBadge called", { reason, source: "app" });
@@ -1835,6 +1936,31 @@ export default function HomePage() {
               )}
               {pushNotice && <p className="install-hint">{pushNotice}</p>}
             </>
+          )}
+          {isBadgeDebugEnabled() && (
+            <section className="badge-debug-panel" aria-label="Badge debug">
+              <div className="badge-debug-grid">
+                <span>navigator.setAppBadge</span>
+                <strong>{String(badgeDebugInfo.navigatorSet)}</strong>
+                <span>navigator.clearAppBadge</span>
+                <strong>{String(badgeDebugInfo.navigatorClear)}</strong>
+                <span>registration.setAppBadge</span>
+                <strong>{String(badgeDebugInfo.registrationSet)}</strong>
+                <span>registration.clearAppBadge</span>
+                <strong>{String(badgeDebugInfo.registrationClear)}</strong>
+              </div>
+              <p className="badge-debug-agent">{badgeDebugInfo.userAgent || "userAgent loading..."}</p>
+              <div className="badge-debug-actions">
+                <button type="button" onClick={testAppBadge}>Test app badge 7</button>
+                <button type="button" onClick={clearAppBadgeDebug}>Clear app badge</button>
+                <button type="button" onClick={testSwBadge}>Test SW badge 8</button>
+                <button type="button" onClick={clearSwBadge}>Clear SW badge</button>
+                <button type="button" onClick={() => refreshBadgeDebug().catch(() => undefined)}>Refresh debug</button>
+                <button type="button" onClick={() => copyBadgeDebug().catch(() => undefined)}>Copy debug</button>
+              </div>
+              {badgeDebugInfo.copyStatus && <p className="badge-debug-status">{badgeDebugInfo.copyStatus}</p>}
+              <pre className="badge-debug-log">{JSON.stringify(badgeDebugEvents.slice(-12), null, 2)}</pre>
+            </section>
           )}
           {newMessageCount > 0 && (
             <button className="new-message-banner" type="button" onClick={handleNewMessageClick}>

@@ -443,6 +443,60 @@ h1 {
   text-align: left;
 }
 
+.badge-debug-panel {
+  max-height: 260px;
+  margin: 10px 0 0 58px;
+  overflow: auto;
+  border: 1px solid rgba(96, 69, 53, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 253, 248, 0.96);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 12px;
+  padding: 10px;
+}
+
+.badge-debug-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 10px;
+}
+
+.badge-debug-agent,
+.badge-debug-status {
+  margin-top: 8px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.badge-debug-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.badge-debug-actions button {
+  border: 1px solid rgba(96, 69, 53, 0.16);
+  border-radius: 999px;
+  background: #fff8ef;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 8px;
+}
+
+.badge-debug-log {
+  max-height: 120px;
+  margin-top: 8px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(61, 42, 32, 0.06);
+  font-size: 11px;
+  white-space: pre-wrap;
+  padding: 8px;
+}
+
 .members-title {
   margin-bottom: 10px;
   color: #5e5149;

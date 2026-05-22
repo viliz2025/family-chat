@@ -157,6 +157,42 @@ self.addEventListener("message", (event) => {
     return;
   }
 
+  if (event.data?.type === "family-chat-test-sw-badge") {
+    const unreadCount = Number(event.data?.unreadCount || 8);
+    event.waitUntil(
+      (async () => {
+        const supported = "setAppBadge" in self.registration;
+        await logBadgeEvent("test sw badge requested", { source: "service worker", unreadCount, supported });
+        if (!supported) return;
+        try {
+          await self.registration.setAppBadge(unreadCount);
+          await logBadgeEvent("test sw badge success", { source: "service worker", unreadCount, supported });
+        } catch (error) {
+          await logBadgeEvent("test sw badge error", { source: "service worker", unreadCount, supported, error: String(error) });
+        }
+      })()
+    );
+    return;
+  }
+
+  if (event.data?.type === "family-chat-clear-sw-badge") {
+    const reason = event.data?.reason || "debug clear sw badge";
+    event.waitUntil(
+      (async () => {
+        const supported = "clearAppBadge" in self.registration;
+        await logBadgeEvent("clear SW badge requested", { source: "service worker", reason, supported });
+        if (!supported) return;
+        try {
+          await self.registration.clearAppBadge();
+          await logBadgeEvent("clear SW badge success", { source: "service worker", reason, supported });
+        } catch (error) {
+          await logBadgeEvent("clear SW badge error", { source: "service worker", reason, supported, error: String(error) });
+        }
+      })()
+    );
+    return;
+  }
+
   if (event.data?.type !== "family-chat-clear-badge") return;
 
   const reason = event.data?.reason || "service worker message";
